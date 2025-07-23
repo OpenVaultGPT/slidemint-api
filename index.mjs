@@ -30,18 +30,32 @@ app.post('/generate', async (req, res) => {
       const url = imageUrls[i];
       const imgPath = path.join(tmpDir, `img${i}.jpg`);
 
-      const response = await fetch(url, {
-        headers: { 'User-Agent': 'Mozilla/5.0' }
-      });
-      const buffer = await response.buffer();
-      await fs.writeFile(imgPath, buffer);
+      try {
+        const response = await fetch(url, {
+          headers: {
+            'User-Agent': 'Mozilla/5.0',
+            'Referer': 'https://www.ebay.co.uk/' // Helps bypass restrictions
+          }
+        });
 
-      lines.push(`file '${imgPath}'`);
-      lines.push(`duration ${duration}`);
+        if (!response.ok) throw new Error(`Fetch failed: ${response.status}`);
+
+        const buffer = await response.buffer();
+        await fs.writeFile(imgPath, buffer);
+
+        lines.push(`file '${imgPath}'`);
+        lines.push(`duration ${duration}`);
+      } catch (fetchErr) {
+        console.warn(`⚠️ Skipping ${url} — ${fetchErr.message}`);
+      }
     }
 
-    // Repeat last frame (needed for ffmpeg to end properly)
-    lines.push(`file '${path.join(tmpDir, `img${imageUrls.length - 1}.jpg`)}'`);
+    if (lines.length === 0) {
+      return res.status(400).send('No valid images could be fetched.');
+    }
+
+    // Repeat last frame so ffmpeg finalises properly
+    lines.push(`file '${path.join(tmpDir, `img${lines.length / 2 - 1}.jpg`)}'`);
 
     await fs.writeFile(inputPath, lines.join('\n'));
 
