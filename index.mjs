@@ -18,60 +18,59 @@ app.post('/generate', async (req, res) => {
 
   const timestamp = Date.now();
   const tmpDir = `/tmp/promo_${timestamp}`;
-  const inputPath = path.join(tmpDir, 'input.txt');
   const outputPath = path.join(tmpDir, 'output.mp4');
 
   try {
     await fs.mkdir(tmpDir, { recursive: true });
 
-    const lines = [];
-
+    // Download and convert images
+    const inputImages = [];
     for (let i = 0; i < imageUrls.length; i++) {
       const url = imageUrls[i];
       const imgPath = path.join(tmpDir, `img${i}.jpg`);
-
       try {
         const response = await fetch(url, {
           headers: {
             'User-Agent': 'Mozilla/5.0',
-            'Referer': 'https://www.ebay.co.uk/' // Helps bypass restrictions
+            'Referer': 'https://www.ebay.co.uk/'
           }
         });
-
         if (!response.ok) throw new Error(`Fetch failed: ${response.status}`);
-
         const buffer = await response.buffer();
         await fs.writeFile(imgPath, buffer);
-
-        lines.push(`file '${imgPath}'`);
-        lines.push(`duration ${duration}`);
-      } catch (fetchErr) {
-        console.warn(`⚠️ Skipping ${url} — ${fetchErr.message}`);
+        inputImages.push(imgPath);
+      } catch (err) {
+        console.warn(`⚠️ Skipping ${url}: ${err.message}`);
       }
     }
 
-    if (lines.length === 0) {
-      return res.status(400).send('No valid images could be fetched.');
+    if (inputImages.length === 0) {
+      return res.status(400).send('No valid images downloaded.');
     }
 
-    // Repeat last frame so ffmpeg finalises properly
-    lines.push(`file '${path.join(tmpDir, `img${lines.length / 2 - 1}.jpg`)}'`);
+    // Build ffmpeg command using filters
+    const filterInputs = inputImages
+      .map((file, idx) => `-loop 1 -t ${duration} -i "${file}"`)
+      .join(' ');
 
-    await fs.writeFile(inputPath, lines.join('\n'));
+    const filterComplex = inputImages
+      .map((_, i) => `[${i}:v]scale=800:600,format=yuv420p[f${i}]`)
+      .join('; ') + `; ` +
+      inputImages.map((_, i) => `[f${i}]`).join('') + `concat=n=${inputImages.length}:v=1:a=0[outv]`;
 
-    const ffmpegCmd = `ffmpeg -f concat -safe 0 -i ${inputPath} -vsync vfr -pix_fmt yuv420p ${outputPath}`;
+    const ffmpegCmd = `ffmpeg ${filterInputs} -filter_complex "${filterComplex}" -map "[outv]" -movflags +faststart ${outputPath}`;
     await execAsync(ffmpegCmd);
 
     const video = await fs.readFile(outputPath);
     res.setHeader('Content-Type', 'video/mp4');
     res.send(video);
   } catch (err) {
-    console.error('❌ Error in /generate handler:', err);
+    console.error('❌ Error generating video:', err);
     res.status(500).send('Internal Server Error');
   }
 });
 
 const port = process.env.PORT || 10000;
 app.listen(port, () => {
-  console.log(`Promo Genie API running on port ${port}`);
+  console.log(`✅ Promo Genie API running on port ${port}`);
 });
