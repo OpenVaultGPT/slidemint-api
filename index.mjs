@@ -21,7 +21,7 @@ async function fetchImageAsCanvasImage(url) {
     const buffer = await response.buffer();
     return await loadImage(buffer);
   } catch (err) {
-    console.error('Image load error:', err);
+    console.error(`❌ Image failed: ${url} – ${err.message}`);
     return null;
   }
 }
@@ -36,6 +36,7 @@ async function createSlideshow(images, outputPath) {
 
   // Render frames
   for (let i = 0; i < images.length; i++) {
+    console.log(`Rendering image ${i + 1} of ${images.length}`);
     const img = await fetchImageAsCanvasImage(images[i]);
     const canvas = createCanvas(width, height);
     const ctx = canvas.getContext('2d');
@@ -55,23 +56,27 @@ async function createSlideshow(images, outputPath) {
       const y = (height - drawHeight) / 2;
       ctx.drawImage(img, x, y, drawWidth, drawHeight);
     } else {
+      ctx.fillStyle = '#111';
+      ctx.fillRect(0, 0, width, height);
       ctx.fillStyle = '#fff';
-      ctx.font = '40px sans-serif';
-      ctx.fillText('Image not loaded', 50, height / 2);
+      ctx.font = 'bold 36px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('⚠️ Image failed to load', width / 2, height / 2);
     }
 
     const outPath = path.join(tempFramesDir, `frame-${String(i).padStart(3, '0')}.png`);
     fs.writeFileSync(outPath, canvas.toBuffer('image/png'));
   }
 
-  // Generate video
+  // Generate video with fade transition
   return new Promise((resolve, reject) => {
+    const inputs = path.join(tempFramesDir, 'frame-%03d.png');
     ffmpeg()
-      .input(path.join(tempFramesDir, 'frame-%03d.png'))
+      .input(inputs)
       .inputFPS(1 / duration)
       .outputFPS(30)
       .videoCodec('libx264')
-      .outputOptions('-pix_fmt yuv420p')
+      .outputOptions('-pix_fmt yuv420p', '-vf', 'fade=t=in:st=0:d=0.5,fade=t=out:st=1.5:d=0.5')
       .save(outputPath)
       .on('end', () => {
         fs.rmSync(tempFramesDir, { recursive: true, force: true });
