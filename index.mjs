@@ -50,7 +50,7 @@ app.post('/generate', async (req, res) => {
 
     // Build ffmpeg command using filters
     const filterInputs = inputImages
-      .map((file, idx) => `-loop 1 -t ${duration} -i "${file}"`)
+      .map((file) => `-loop 1 -t ${duration} -i "${file}"`)
       .join(' ');
 
     const filterComplex = inputImages
@@ -58,7 +58,7 @@ app.post('/generate', async (req, res) => {
       .join('; ') + `; ` +
       inputImages.map((_, i) => `[f${i}]`).join('') + `concat=n=${inputImages.length}:v=1:a=0[outv]`;
 
-    const ffmpegCmd = `ffmpeg ${filterInputs} -filter_complex "${filterComplex}" -map "[outv]" -movflags +faststart ${outputPath}`;
+    const ffmpegCmd = `ffmpeg ${filterInputs} -filter_complex "${filterComplex}" -map "[outv]" -shortest -movflags +faststart ${outputPath}`;
     await execAsync(ffmpegCmd);
 
     const video = await fs.readFile(outputPath);
