@@ -1,73 +1,18 @@
-const express = require("express");
-const bodyParser = require("body-parser");
-const fs = require("fs");
-const { v4: uuidv4 } = require("uuid");
-const path = require("path");
-const ffmpeg = require("fluent-ffmpeg");
-const axios = require("axios");
-
+const express = require('express');
 const app = express();
-const PORT = process.env.PORT || 10000;
+const port = process.env.PORT || 10000;
 
-app.use(bodyParser.json());
+app.use(express.json());
 
-app.post("/process", async (req, res) => {
-  const { imageUrls, duration, textOverlay } = req.body;
-
-  if (!imageUrls || !Array.isArray(imageUrls)) {
-    return res.status(400).json({ error: "Invalid imageUrls format." });
-  }
-
-  const folder = path.join(__dirname, "temp", uuidv4());
-  fs.mkdirSync(folder, { recursive: true });
-
-  try {
-    // Download images
-    const downloadedFiles = [];
-    for (let i = 0; i < imageUrls.length; i++) {
-      const url = imageUrls[i];
-      const filename = path.join(folder, `img${i}.jpg`);
-      const response = await axios.get(url, {
-        responseType: "arraybuffer",
-        headers: {
-          "User-Agent":
-            "Mozilla/5.0 (compatible; PromoGenieBot/1.0; +https://promo-genie-api.onrender.com)",
-        },
-      });
-      fs.writeFileSync(filename, response.data);
-      downloadedFiles.push(filename);
-    }
-
-    // Generate video using ffmpeg
-    const outputPath = path.join(folder, "output.mp4");
-    const ffmpegCommand = ffmpeg();
-
-    downloadedFiles.forEach((file) => {
-      ffmpegCommand.input(file).loop(duration || 2);
-    });
-
-    ffmpegCommand
-      .on("end", () => {
-        res.download(outputPath, "slideshow.mp4", () => {
-          fs.rmSync(folder, { recursive: true, force: true });
-        });
-      })
-      .on("error", (err) => {
-        console.error("FFmpeg error:", err);
-        res.status(500).json({ error: "Video generation failed." });
-        fs.rmSync(folder, { recursive: true, force: true });
-      })
-      .outputOptions("-preset veryfast")
-      .output(outputPath)
-      .run();
-  } catch (err) {
-    console.error("Error during processing:", err.message);
-    res.status(500).json({ error: "Internal server error." });
-    fs.rmSync(folder, { recursive: true, force: true });
-  }
+app.post('/generate', (req, res) => {
+  const { title, desc } = req.body;
+  res.json({
+    success: true,
+    message: `Received: ${title} - ${desc}`
+  });
 });
 
-app.listen(PORT, () => {
-  console.log(`Promo Genie API running on port ${PORT}`);
+app.listen(port, () => {
+  console.log(`Promo Genie API running on port ${port}`);
 });
 
