@@ -13,7 +13,6 @@ app.use(express.json());
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Helper to fetch remote image and load it as canvas image
 async function fetchImageAsCanvasImage(url) {
   try {
     const response = await fetch(url);
@@ -26,15 +25,13 @@ async function fetchImageAsCanvasImage(url) {
   }
 }
 
-// Create a video from image URLs
 async function createSlideshow(images, outputPath) {
-  const width = 1280;
-  const height = 720;
-  const duration = 2; // seconds per image
+  const width = 720;
+  const height = 1280;
+  const duration = 2;
   const tempFramesDir = path.join(__dirname, 'frames', uuidv4());
   fs.mkdirSync(tempFramesDir, { recursive: true });
 
-  // Render frames
   for (let i = 0; i < images.length; i++) {
     console.log(`Rendering image ${i + 1} of ${images.length}`);
     const img = await fetchImageAsCanvasImage(images[i]);
@@ -46,7 +43,9 @@ async function createSlideshow(images, outputPath) {
 
     if (img) {
       const aspect = img.width / img.height;
-      let drawWidth = width, drawHeight = width / aspect;
+      let drawWidth = width;
+      let drawHeight = width / aspect;
+
       if (drawHeight > height) {
         drawHeight = height;
         drawWidth = height * aspect;
@@ -68,7 +67,6 @@ async function createSlideshow(images, outputPath) {
     fs.writeFileSync(outPath, canvas.toBuffer('image/png'));
   }
 
-  // Generate video with fade transition
   return new Promise((resolve, reject) => {
     const inputs = path.join(tempFramesDir, 'frame-%03d.png');
     ffmpeg()
@@ -76,19 +74,19 @@ async function createSlideshow(images, outputPath) {
       .inputFPS(1 / duration)
       .outputFPS(30)
       .videoCodec('libx264')
-      .outputOptions('-pix_fmt yuv420p', '-vf', 'fade=t=in:st=0:d=0.5,fade=t=out:st=1.5:d=0.5')
+      .outputOptions('-pix_fmt yuv420p')
       .save(outputPath)
       .on('end', () => {
         fs.rmSync(tempFramesDir, { recursive: true, force: true });
         resolve();
       })
       .on('error', (err) => {
+        console.error('❌ FFmpeg error:', err.message);
         reject(err);
       });
   });
 }
 
-// API endpoint
 app.post('/generate', async (req, res) => {
   const { imageUrls } = req.body;
   if (!Array.isArray(imageUrls) || imageUrls.length === 0) {
@@ -103,15 +101,12 @@ app.post('/generate', async (req, res) => {
     await createSlideshow(imageUrls, outputPath);
     res.status(200).json({ videoUrl: `/videos/${videoId}.mp4` });
   } catch (err) {
-    console.error('Video generation error:', err);
     res.status(500).json({ error: 'Video generation failed' });
   }
 });
 
-// Serve generated videos
 app.use('/videos', express.static(path.join(__dirname, 'videos')));
 
-// Start server
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`PromoGenie API running on port ${PORT}`);
