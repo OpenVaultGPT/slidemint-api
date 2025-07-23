@@ -20,7 +20,7 @@ async function fetchImageAsCanvasImage(url) {
     if (!response.ok) throw new Error(`Failed to fetch image: ${url}`);
     const buffer = await response.buffer();
 
-    // Convert to PNG to ensure compatibility with canvas
+    // Convert to PNG to avoid webp/avif issues
     const convertedBuffer = await sharp(buffer).png().toBuffer();
     return await loadImage(convertedBuffer);
   } catch (err) {
