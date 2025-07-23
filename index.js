@@ -1,4 +1,3 @@
-// Import required modules
 import express from 'express';
 import cors from 'cors';
 import fs from 'fs';
@@ -18,7 +17,7 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Endpoint to process image slideshow
+// POST endpoint to process slideshow
 app.post('/process', async (req, res) => {
   const { imageUrls, duration, textOverlay } = req.body;
 
@@ -28,12 +27,14 @@ app.post('/process', async (req, res) => {
 
   try {
     const tempDir = path.join(__dirname, 'tmp');
-    if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir);
+    if (!fs.existsSync(tempDir)) {
+      fs.mkdirSync(tempDir);
+    }
 
     // Download images
     const imagePaths = await Promise.all(
       imageUrls.map(async (url) => {
-        const filename = `${uuidv4()}.jpg`;
+        const filename = `${uuidv4()}.jpeg`;
         const filepath = path.join(tempDir, filename);
         const writer = fs.createWriteStream(filepath);
         const response = await axios.get(url, { responseType: 'stream' });
@@ -48,48 +49,34 @@ app.post('/process', async (req, res) => {
       })
     );
 
-    // Generate output path
-    const outputFile = path.join(tempDir, `${uuidv4()}.mp4`);
-    let ffmpegCommand = ffmpeg();
+    // Prepare ffmpeg input list
+    const listPath = path.join(tempDir, 'input.txt');
+    const listContent = imagePaths
+      .map((p) => `file '${p.replace(/'/g, "\\'")}'\nduration ${duration}`)
+      .join('\n');
+    fs.writeFileSync(listPath, listContent);
 
-    // Add images as input
-    imagePaths.forEach((imgPath) => {
-      ffmpegCommand = ffmpegCommand.input(imgPath).inputOptions('-loop 1');
+    // Output video
+    const outputPath = path.join(tempDir, `${uuidv4()}.mp4`);
+    const textFilter = `drawtext=text='${textOverlay}':fontcolor=white:fontsize=36:x=(w-text_w)/2:y=h-60`;
+
+    await new Promise((resolve, reject) => {
+      ffmpeg()
+        .input(listPath)
+        .inputOptions('-f', 'concat', '-safe', '0')
+        .outputOptions('-vf', textFilter)
+        .output(outputPath)
+        .on('end', resolve)
+        .on('error', reject)
+        .run();
     });
 
-    // Set duration and output options
-    ffmpegCommand
-      .inputOptions(`-t ${duration}`)
-      .complexFilter(
-        textOverlay
-          ? [
-              `drawtext=text='${textOverlay}':fontcolor=white:fontsize=24:x=(w-text_w)/2:y=h-50`
-            ]
-          : []
-      )
-      .on('end', () => {
-        res.download(outputFile, () => {
-          // Clean up
-          imagePaths.forEach((p) => fs.unlinkSync(p));
-          fs.unlinkSync(outputFile);
-        });
-      })
-      .on('error', (err) => {
-        console.error('FFmpeg error:', err.message);
-        res.status(500).json({ error: 'Video processing failed' });
-        // Clean up
-        imagePaths.forEach((p) => fs.unlinkSync(p));
-        if (fs.existsSync(outputFile)) fs.unlinkSync(outputFile);
-      })
-      .save(outputFile);
-  } catch (err) {
-    console.error('Server error:', err);
+    res.download(outputPath, 'promo.mp4', (err) => {
+      if (err) console.error('Download error:', err);
+      imagePaths.concat(outputPath, listPath).forEach((p) => fs.unlinkSync(p));
+    });
+  } catch (error) {
+    console.error('Processing failed:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
-});
-
-// Start server
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`✅ Promo Genie API running on port ${PORT}`);
 });
