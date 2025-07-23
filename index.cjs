@@ -1,76 +1,78 @@
-const express = require("express");
-const bodyParser = require("body-parser");
-const fs = require("fs");
-const { v4: uuidv4 } = require("uuid");
-const path = require("path");
-const ffmpeg = require("fluent-ffmpeg");
-const axios = require("axios");
+import express from 'express';
+import ffmpeg from 'fluent-ffmpeg';
+import fetch from 'node-fetch';
+import fs from 'fs';
+import path from 'path';
+import { v4 as uuidv4 } from 'uuid';
+import { fileURLToPath } from 'url';
+import { tmpdir } from 'os';
 
 const app = express();
+app.use(express.json({ limit: '10mb' }));
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
 const PORT = process.env.PORT || 10000;
 
-app.use(bodyParser.json());
-
-app.post("/generate", async (req, res) => {
-  const { imageUrls, duration } = req.body;
-
-  if (!imageUrls || !Array.isArray(imageUrls)) {
-    return res.status(400).json({ error: "Invalid imageUrls format." });
-  }
-
-  const folder = path.join(__dirname, "temp", uuidv4());
-  fs.mkdirSync(folder, { recursive: true });
-
+app.post('/generate', async (req, res) => {
   try {
-    // Download images
-    const downloadedFiles = [];
-    for (let i = 0; i < imageUrls.length; i++) {
-      const url = imageUrls[i];
-      const filename = path.join(folder, `img${i}.jpg`);
-      const response = await axios.get(url, {
-        responseType: "arraybuffer",
-        headers: {
-          "User-Agent":
-            "Mozilla/5.0 (compatible; PromoGenieBot/1.0; +https://promo-genie-api.onrender.com)",
-        },
-      });
-      fs.writeFileSync(filename, response.data);
-      downloadedFiles.push(filename);
+    const { imageUrls, duration = 1.5 } = req.body;
+    if (!imageUrls || !Array.isArray(imageUrls)) {
+      return res.status(400).json({ error: 'Missing or invalid imageUrls array.' });
     }
 
-    // Generate slideshow video
-    const outputPath = path.join(folder, "output.mp4");
-    const ffmpegCommand = ffmpeg();
+    const tempDir = path.join(tmpdir(), uuidv4());
+    fs.mkdirSync(tempDir);
 
-    downloadedFiles.forEach((file) => {
-      ffmpegCommand.input(file).loop(duration || 1.5);
+    const downloaded = [];
+    for (let i = 0; i < imageUrls.length; i++) {
+      const url = imageUrls[i];
+      const filename = path.join(tempDir, `img${i}.jpg`);
+      const response = await fetch(url);
+      const buffer = await response.buffer();
+      fs.writeFileSync(filename, buffer);
+      downloaded.push(filename);
+    }
+
+    const outputPath = path.join(tempDir, `slideshow.mp4`);
+    const command = ffmpeg();
+
+    downloaded.forEach(img => {
+      command.input(img).loop(duration);
     });
 
-    ffmpegCommand
-      .on("end", () => {
-        res.download(outputPath, "tiktok-style.mp4", () => {
-          fs.rmSync(folder, { recursive: true, force: true });
+    command
+      .inputOptions('-framerate 1')
+      .videoCodec('libx264')
+      .size('1080x1920')
+      .format('mp4')
+      .outputOptions([
+        '-pix_fmt yuv420p',
+        '-r 30',
+        '-movflags +faststart'
+      ])
+      .on('end', () => {
+        res.setHeader('Content-Type', 'video/mp4');
+        res.setHeader('Content-Disposition', 'attachment; filename="tiktok-style.mp4"');
+        const stream = fs.createReadStream(outputPath);
+        stream.pipe(res).on('finish', () => {
+          fs.rmSync(tempDir, { recursive: true, force: true });
         });
       })
-      .on("error", (err) => {
-        console.error("FFmpeg error:", err.message);
-        res.status(500).json({ error: "Video generation failed." });
-        fs.rmSync(folder, { recursive: true, force: true });
+      .on('error', (err) => {
+        console.error('FFmpeg error:', err);
+        res.status(500).json({ error: 'Video generation failed.' });
       })
-      .inputOptions("-y")
-      .videoCodec("libx264")
-      .outputOptions([
-        "-preset veryfast",
-        "-r 30",
-        "-vf scale=1080:1920"
-      ])
-      .output(outputPath)
-      .run();
+      .save(outputPath);
   } catch (err) {
-    console.error("Error during processing:", err.message);
-    res.status(500).json({ error: "Internal server error." });
-    fs.rmSync(folder, { recursive: true, force: true });
+    console.error('Server error:', err);
+    res.status(500).json({ error: 'Internal server error.' });
   }
+});
+
+app.get('/', (req, res) => {
+  res.send('Promo Genie API running...');
 });
 
 app.listen(PORT, () => {
