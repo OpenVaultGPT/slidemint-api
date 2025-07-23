@@ -1,75 +1,63 @@
 import express from 'express';
 import fetch from 'node-fetch';
-import fs from 'fs';
+import fs from 'fs/promises';
 import { exec } from 'child_process';
-import { v4 as uuidv4 } from 'uuid';
+import { promisify } from 'util';
+import path from 'path';
 
 const app = express();
 app.use(express.json());
+const execAsync = promisify(exec);
 
 app.post('/generate', async (req, res) => {
   const { imageUrls, duration } = req.body;
 
+  if (!imageUrls || !Array.isArray(imageUrls) || imageUrls.length === 0) {
+    return res.status(400).send('No image URLs provided.');
+  }
+
+  const timestamp = Date.now();
+  const tmpDir = `/tmp/promo_${timestamp}`;
+  const inputPath = path.join(tmpDir, 'input.txt');
+  const outputPath = path.join(tmpDir, 'output.mp4');
+
   try {
-    if (!imageUrls || !Array.isArray(imageUrls)) {
-      throw new Error('Missing or invalid imageUrls array');
-    }
+    await fs.mkdir(tmpDir, { recursive: true });
 
-    const folder = `./tmp/${uuidv4()}`;
-    fs.mkdirSync(folder, { recursive: true });
+    const lines = [];
 
-    // Step 1: Download images
-    const downloadedImages = [];
     for (let i = 0; i < imageUrls.length; i++) {
       const url = imageUrls[i];
-      const response = await fetch(url);
-      if (!response.ok) throw new Error(`Failed to fetch image: ${url}`);
+      const imgPath = path.join(tmpDir, `img${i}.jpg`);
+
+      const response = await fetch(url, {
+        headers: { 'User-Agent': 'Mozilla/5.0' }
+      });
       const buffer = await response.buffer();
-      const imagePath = `${folder}/image${i.toString().padStart(3, '0')}.jpg`;
-      fs.writeFileSync(imagePath, buffer);
-      downloadedImages.push(imagePath);
+      await fs.writeFile(imgPath, buffer);
+
+      lines.push(`file '${imgPath}'`);
+      lines.push(`duration ${duration}`);
     }
-    console.log('✅ Images downloaded');
 
-    // Step 2: Create input.txt
-    const inputList = downloadedImages.map(
-      (img) => `file '${img}'\nduration ${duration || 2}`
-    );
-    const lastFrame = `file '${downloadedImages[downloadedImages.length - 1]}'`; // no duration
-    fs.writeFileSync(`${folder}/input.txt`, [...inputList, lastFrame].join('\n'));
-    console.log('✅ input.txt created');
+    // Repeat last frame (needed for ffmpeg to end properly)
+    lines.push(`file '${path.join(tmpDir, `img${imageUrls.length - 1}.jpg`)}'`);
 
-    // Step 3: Run ffmpeg
-    const outputPath = `${folder}/output.mp4`;
-    await new Promise((resolve, reject) => {
-      exec(
-        `ffmpeg -f concat -safe 0 -i ${folder}/input.txt -vsync vfr -pix_fmt yuv420p ${outputPath}`,
-        (err, stdout, stderr) => {
-          if (err) {
-            console.error('❌ ffmpeg error:', stderr);
-            return reject(err);
-          }
-          console.log('✅ ffmpeg completed');
-          resolve();
-        }
-      );
-    });
+    await fs.writeFile(inputPath, lines.join('\n'));
 
-    // Step 4: Read and send video
-    if (!fs.existsSync(outputPath)) throw new Error('Output video not found!');
-    const videoBuffer = fs.readFileSync(outputPath);
+    const ffmpegCmd = `ffmpeg -f concat -safe 0 -i ${inputPath} -vsync vfr -pix_fmt yuv420p ${outputPath}`;
+    await execAsync(ffmpegCmd);
+
+    const video = await fs.readFile(outputPath);
     res.setHeader('Content-Type', 'video/mp4');
-    res.send(videoBuffer);
-    console.log('✅ Response sent');
-
-    // Optional: Clean up temp folder
-    fs.rmSync(folder, { recursive: true, force: true });
+    res.send(video);
   } catch (err) {
-    console.error('💥 Error caught in handler:', err);
-    res.status(500).send({ error: err.message || 'Unknown error' });
+    console.error('❌ Error in /generate handler:', err);
+    res.status(500).send('Internal Server Error');
   }
 });
 
-app.listen(10000, () => {
-  console.log('Promo Genie API running on port 10000');
+const port = process.env.PORT || 10000;
+app.listen(port, () => {
+  console.log(`Promo Genie API running on port ${port}`);
 });
