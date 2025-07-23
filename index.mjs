@@ -4,6 +4,7 @@ import fetch from 'node-fetch';
 import fs from 'fs';
 import path from 'path';
 import ffmpeg from 'fluent-ffmpeg';
+import sharp from 'sharp';
 import { fileURLToPath } from 'url';
 import { v4 as uuidv4 } from 'uuid';
 
@@ -18,7 +19,10 @@ async function fetchImageAsCanvasImage(url) {
     const response = await fetch(url);
     if (!response.ok) throw new Error(`Failed to fetch image: ${url}`);
     const buffer = await response.buffer();
-    return await loadImage(buffer);
+
+    // Convert to PNG to ensure compatibility with canvas
+    const convertedBuffer = await sharp(buffer).png().toBuffer();
+    return await loadImage(convertedBuffer);
   } catch (err) {
     console.error(`❌ Image failed: ${url} – ${err.message}`);
     return null;
