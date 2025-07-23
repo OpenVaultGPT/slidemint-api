@@ -1,5 +1,11 @@
 {
-  "type": "module",
+  "name": "promo-genie-api",
+  "version": "1.0.0",
+  "description": "Generate fast TikTok-style slideshow videos from image URLs",
+  "main": "index.mjs",
+  "scripts": {
+    "start": "node index.mjs"
+  },
   "dependencies": {
     "express": "^4.18.2",
     "fluent-ffmpeg": "^2.1.2",
@@ -7,6 +13,6 @@
     "uuid": "^9.0.0"
   },
   "engines": {
-    "node": ">=16"
+    "node": ">=18.0.0"
   }
 }
