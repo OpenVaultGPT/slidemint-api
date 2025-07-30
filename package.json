@@ -1,8 +1,17 @@
-"dependencies": {
-  "canvas": "^2.11.2",
-  "express": "^4.19.2",
-  "fluent-ffmpeg": "^2.1.2",
-  "node-fetch": "^3.3.2",
-  "uuid": "^9.0.1",
-  "sharp": "^0.33.3"
+{
+  "name": "promo-genie-api",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "index.mjs",
+  "scripts": {
+    "start": "node index.mjs"
+  },
+  "dependencies": {
+    "canvas": "^2.11.2",
+    "express": "^4.18.2",
+    "fluent-ffmpeg": "^2.1.2",
+    "node-fetch": "^3.3.2",
+    "uuid": "^9.0.1",
+    "sharp": "^0.32.4"
+  }
 }
