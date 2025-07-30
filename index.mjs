@@ -14,7 +14,7 @@ app.use(express.json());
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// ✅ Clean, minimal image fetch and resize
+// 🔧 Safe fetch + resize
 async function fetchImageAsCanvasImage(url) {
   try {
     const response = await fetch(url, { timeout: 8000 });
@@ -22,7 +22,7 @@ async function fetchImageAsCanvasImage(url) {
     const buffer = await response.buffer();
 
     const resized = await sharp(buffer)
-      .resize({ width: 720 }) // 🔒 Safe max width
+      .resize({ width: 720 })
       .png()
       .toBuffer();
 
@@ -77,15 +77,17 @@ async function createSlideshow(images, outputPath, duration = 2) {
 
   return new Promise((resolve, reject) => {
     const inputs = path.join(tempFramesDir, 'frame-%03d.png');
-    ffmpeg()
+    const command = ffmpeg()
       .input(inputs)
       .inputFPS(1 / duration)
       .outputFPS(30)
       .videoCodec('libx264')
       .outputOptions('-pix_fmt yuv420p')
       .save(outputPath)
-      .on('stderr', (line) => console.log('FFmpeg:', line))
+      .on('start', (cmd) => console.log('🎬 FFmpeg started:', cmd))
+      .on('stderr', (line) => console.log('📦 FFmpeg:', line))
       .on('end', () => {
+        console.log('✅ FFmpeg finished');
         fs.rmSync(tempFramesDir, { recursive: true, force: true });
         resolve();
       })
@@ -103,16 +105,24 @@ app.post('/generate', async (req, res) => {
     return res.status(400).json({ error: 'No image URLs provided' });
   }
 
-  const safeImageUrls = imageUrls.slice(0, 12); // ✅ Limit to 12 max
+  const safeImageUrls = imageUrls.slice(0, 12); // ✅ Up to 12 images
   const videoId = uuidv4();
   const outputPath = path.join(__dirname, 'videos', `${videoId}.mp4`);
   fs.mkdirSync(path.dirname(outputPath), { recursive: true });
 
   try {
+    console.log(`🎬 Generating video: ${videoId}`);
+    console.log('🧠 Memory usage at start:', process.memoryUsage());
+    console.time('🕒 Slideshow duration');
+
     await createSlideshow(safeImageUrls, outputPath, duration);
+
+    console.timeEnd('🕒 Slideshow duration');
+    console.log('🧠 Memory usage at end:', process.memoryUsage());
+
     res.status(200).json({ videoUrl: `/videos/${videoId}.mp4` });
   } catch (err) {
-    console.error('❌ Video generation failed:', err.message);
+    console.error('❌ Slideshow generation failed:', err.message);
     res.status(500).json({ error: 'Video generation failed' });
   }
 });
