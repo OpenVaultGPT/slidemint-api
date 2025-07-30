@@ -8,49 +8,31 @@ import sharp from 'sharp';
 import { fileURLToPath } from 'url';
 import { v4 as uuidv4 } from 'uuid';
 
-sharp.cache(false); // Prevent sharp memory bloat
-
 const app = express();
 app.use(express.json());
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// ✅ Safe image fetch + resize + fallback
+// ✅ Clean, minimal image fetch and resize
 async function fetchImageAsCanvasImage(url) {
   try {
-    const response = await fetch(url, { timeout: 10000 });
-
-    const contentType = response.headers.get('content-type');
-    if (!response.ok || !contentType || !contentType.startsWith('image')) {
-      throw new Error(`Invalid response or non-image URL: ${url}`);
-    }
-
+    const response = await fetch(url, { timeout: 8000 });
+    if (!response.ok) throw new Error(`Image fetch failed: ${url}`);
     const buffer = await response.buffer();
 
-    const convertedBuffer = await sharp(buffer)
-      .resize({ width: 720 }) // Safe resize
+    const resized = await sharp(buffer)
+      .resize({ width: 720 }) // 🔒 Safe max width
       .png()
       .toBuffer();
 
-    return await loadImage(convertedBuffer);
+    return await loadImage(resized);
   } catch (err) {
-    console.error(`❌ Failed image: ${url} — ${err.message}`);
-
-    const canvas = createCanvas(720, 1280);
-    const ctx = canvas.getContext('2d');
-    ctx.fillStyle = '#111';
-    ctx.fillRect(0, 0, 720, 1280);
-    ctx.fillStyle = '#fff';
-    ctx.font = 'bold 36px sans-serif';
-    ctx.textAlign = 'center';
-    ctx.fillText('⚠️ Image failed to load', 360, 640);
-
-    return await loadImage(canvas.toBuffer('image/png'));
+    console.error(`❌ Failed image: ${url} – ${err.message}`);
+    return null;
   }
 }
 
-// 🎞️ Slideshow generator
 async function createSlideshow(images, outputPath, duration = 2) {
   const width = 720;
   const height = 1280;
@@ -58,7 +40,7 @@ async function createSlideshow(images, outputPath, duration = 2) {
   fs.mkdirSync(tempFramesDir, { recursive: true });
 
   for (let i = 0; i < images.length; i++) {
-    console.log(`🖼️ Rendering frame ${i + 1} of ${images.length}`);
+    console.log(`🖼️ Rendering image ${i + 1} of ${images.length}`);
     const img = await fetchImageAsCanvasImage(images[i]);
 
     const canvas = createCanvas(width, height);
@@ -80,6 +62,13 @@ async function createSlideshow(images, outputPath, duration = 2) {
       const x = (width - drawWidth) / 2;
       const y = (height - drawHeight) / 2;
       ctx.drawImage(img, x, y, drawWidth, drawHeight);
+    } else {
+      ctx.fillStyle = '#111';
+      ctx.fillRect(0, 0, width, height);
+      ctx.fillStyle = '#fff';
+      ctx.font = 'bold 36px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('⚠️ Image failed to load', width / 2, height / 2);
     }
 
     const framePath = path.join(tempFramesDir, `frame-${String(i).padStart(3, '0')}.png`);
@@ -107,7 +96,6 @@ async function createSlideshow(images, outputPath, duration = 2) {
   });
 }
 
-// 🚀 POST /generate – accepts { imageUrls, duration }
 app.post('/generate', async (req, res) => {
   const { imageUrls, duration = 2 } = req.body;
 
@@ -115,25 +103,22 @@ app.post('/generate', async (req, res) => {
     return res.status(400).json({ error: 'No image URLs provided' });
   }
 
-  const safeImageUrls = imageUrls.slice(0, 15);
+  const safeImageUrls = imageUrls.slice(0, 12); // ✅ Limit to 12 max
   const videoId = uuidv4();
   const outputPath = path.join(__dirname, 'videos', `${videoId}.mp4`);
   fs.mkdirSync(path.dirname(outputPath), { recursive: true });
 
   try {
-    console.log(`🎬 Generating video: ${videoId}`);
     await createSlideshow(safeImageUrls, outputPath, duration);
     res.status(200).json({ videoUrl: `/videos/${videoId}.mp4` });
   } catch (err) {
-    console.error('❌ Slideshow generation failed:', err.message);
+    console.error('❌ Video generation failed:', err.message);
     res.status(500).json({ error: 'Video generation failed' });
   }
 });
 
-// Serve static videos
 app.use('/videos', express.static(path.join(__dirname, 'videos')));
 
-// Start server
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 PromoGenie backend running on port ${PORT}`);
