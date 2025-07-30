@@ -14,13 +14,12 @@ app.use(express.json());
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// Load and convert remote image to canvas-friendly PNG
 async function fetchImageAsCanvasImage(url) {
   try {
     const response = await fetch(url);
     if (!response.ok) throw new Error(`Failed to fetch image: ${url}`);
     const buffer = await response.buffer();
-
-    // Convert to PNG to avoid webp/avif issues
     const convertedBuffer = await sharp(buffer).png().toBuffer();
     return await loadImage(convertedBuffer);
   } catch (err) {
@@ -29,19 +28,20 @@ async function fetchImageAsCanvasImage(url) {
   }
 }
 
+// Create slideshow video from array of image URLs
 async function createSlideshow(images, outputPath, duration = 2) {
   const width = 720;
   const height = 1280;
-  const duration = 2; // seconds per image
   const tempFramesDir = path.join(__dirname, 'frames', uuidv4());
   fs.mkdirSync(tempFramesDir, { recursive: true });
 
   for (let i = 0; i < images.length; i++) {
-    console.log(`Rendering image ${i + 1} of ${images.length}`);
+    console.log(`🖼️ Rendering image ${i + 1} of ${images.length}`);
     const img = await fetchImageAsCanvasImage(images[i]);
     const canvas = createCanvas(width, height);
     const ctx = canvas.getContext('2d');
 
+    // Fill background
     ctx.fillStyle = '#000';
     ctx.fillRect(0, 0, width, height);
 
@@ -75,8 +75,8 @@ async function createSlideshow(images, outputPath, duration = 2) {
     const inputs = path.join(tempFramesDir, 'frame-%03d.png');
     ffmpeg()
       .input(inputs)
-      .inputFPS(1 / duration) // Each frame shows for `duration` seconds
-      .outputFPS(30) // Playback FPS
+      .inputFPS(1 / duration) // Seconds per frame
+      .outputFPS(30)          // Smooth playback
       .videoCodec('libx264')
       .outputOptions('-pix_fmt yuv420p')
       .save(outputPath)
@@ -91,14 +91,15 @@ async function createSlideshow(images, outputPath, duration = 2) {
   });
 }
 
+// Endpoint: POST /generate
 app.post('/generate', async (req, res) => {
   const { imageUrls, duration = 2 } = req.body;
+
   if (!Array.isArray(imageUrls) || imageUrls.length === 0) {
     return res.status(400).json({ error: 'No image URLs provided' });
   }
 
-  // Optional: cap max image count to prevent abuse
-  const safeImageUrls = imageUrls.slice(0, 15); // Max 15 images per request
+  const safeImageUrls = imageUrls.slice(0, 15); // Limit to 15 images
   const videoId = uuidv4();
   const outputPath = path.join(__dirname, 'videos', `${videoId}.mp4`);
   fs.mkdirSync(path.dirname(outputPath), { recursive: true });
@@ -111,6 +112,7 @@ app.post('/generate', async (req, res) => {
   }
 });
 
+// Serve videos statically
 app.use('/videos', express.static(path.join(__dirname, 'videos')));
 
 const PORT = process.env.PORT || 3000;
