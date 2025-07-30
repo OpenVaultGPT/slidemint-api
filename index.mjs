@@ -92,20 +92,19 @@ async function createSlideshow(images, outputPath) {
 }
 
 app.post('/generate', async (req, res) => {
-  const { imageUrls } = req.body;
+  const { imageUrls, duration = 2 } = req.body;
   if (!Array.isArray(imageUrls) || imageUrls.length === 0) {
     return res.status(400).json({ error: 'No image URLs provided' });
   }
 
   // Optional: cap max image count to prevent abuse
   const safeImageUrls = imageUrls.slice(0, 15); // Max 15 images per request
-
   const videoId = uuidv4();
   const outputPath = path.join(__dirname, 'videos', `${videoId}.mp4`);
   fs.mkdirSync(path.dirname(outputPath), { recursive: true });
 
   try {
-    await createSlideshow(safeImageUrls, outputPath);
+    await createSlideshow(safeImageUrls, outputPath, duration);
     res.status(200).json({ videoUrl: `/videos/${videoId}.mp4` });
   } catch (err) {
     res.status(500).json({ error: 'Video generation failed' });
