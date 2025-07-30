@@ -79,10 +79,11 @@ async function createSlideshow(images, outputPath, duration = 2) {
   const inputs = path.join(tempFramesDir, 'frame-%03d.png');
 
   const command = ffmpeg()
-    .input(inputs)
-    .inputOptions([
-      '-framerate', (1 / duration).toFixed(2)
-    ])
+  .input(inputs)
+  .inputOptions([
+    '-stream_loop', '1', // ✅ Loop the input 1 extra time = play twice
+    '-framerate', (1 / duration).toFixed(2)
+  ])
     .outputOptions([
       '-vf', 'scale=720:-2',
       '-r', '30',
