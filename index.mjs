@@ -8,7 +8,7 @@ import sharp from 'sharp';
 import { fileURLToPath } from 'url';
 import { v4 as uuidv4 } from 'uuid';
 
-sharp.cache(false); // Prevent memory bloat on large jobs
+sharp.cache(false); // Prevent sharp memory bloat
 
 const app = express();
 app.use(express.json());
@@ -16,28 +16,41 @@ app.use(express.json());
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// 🔧 Fetch image → resize → convert to PNG → load into canvas
+// ✅ Safe image fetch + resize + fallback
 async function fetchImageAsCanvasImage(url) {
   try {
-    const response = await fetch(url, { timeout: 10000 }); // 10s timeout
-    if (!response.ok) throw new Error(`Failed to fetch image: ${url}`);
+    const response = await fetch(url, { timeout: 10000 });
+
+    const contentType = response.headers.get('content-type');
+    if (!response.ok || !contentType || !contentType.startsWith('image')) {
+      throw new Error(`Invalid response or non-image URL: ${url}`);
+    }
 
     const buffer = await response.buffer();
 
-    // Resize and convert WebP/etc to PNG for canvas safety
     const convertedBuffer = await sharp(buffer)
-      .resize({ width: 720 }) // Resize for safety
+      .resize({ width: 720 }) // Safe resize
       .png()
       .toBuffer();
 
     return await loadImage(convertedBuffer);
   } catch (err) {
     console.error(`❌ Failed image: ${url} — ${err.message}`);
-    return null;
+
+    const canvas = createCanvas(720, 1280);
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#111';
+    ctx.fillRect(0, 0, 720, 1280);
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 36px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('⚠️ Image failed to load', 360, 640);
+
+    return await loadImage(canvas.toBuffer('image/png'));
   }
 }
 
-// 🎞️ Create slideshow video from image list
+// 🎞️ Slideshow generator
 async function createSlideshow(images, outputPath, duration = 2) {
   const width = 720;
   const height = 1280;
@@ -67,13 +80,6 @@ async function createSlideshow(images, outputPath, duration = 2) {
       const x = (width - drawWidth) / 2;
       const y = (height - drawHeight) / 2;
       ctx.drawImage(img, x, y, drawWidth, drawHeight);
-    } else {
-      ctx.fillStyle = '#111';
-      ctx.fillRect(0, 0, width, height);
-      ctx.fillStyle = '#fff';
-      ctx.font = 'bold 36px sans-serif';
-      ctx.textAlign = 'center';
-      ctx.fillText('⚠️ Image failed to load', width / 2, height / 2);
     }
 
     const framePath = path.join(tempFramesDir, `frame-${String(i).padStart(3, '0')}.png`);
@@ -101,7 +107,7 @@ async function createSlideshow(images, outputPath, duration = 2) {
   });
 }
 
-// 🎯 POST /generate – accepts imageUrls + optional duration
+// 🚀 POST /generate – accepts { imageUrls, duration }
 app.post('/generate', async (req, res) => {
   const { imageUrls, duration = 2 } = req.body;
 
@@ -115,16 +121,16 @@ app.post('/generate', async (req, res) => {
   fs.mkdirSync(path.dirname(outputPath), { recursive: true });
 
   try {
-    console.log(`🎬 Starting video: ${videoId}`);
+    console.log(`🎬 Generating video: ${videoId}`);
     await createSlideshow(safeImageUrls, outputPath, duration);
     res.status(200).json({ videoUrl: `/videos/${videoId}.mp4` });
   } catch (err) {
-    console.error('❌ Slideshow failed:', err);
+    console.error('❌ Slideshow generation failed:', err.message);
     res.status(500).json({ error: 'Video generation failed' });
   }
 });
 
-// Serve generated videos
+// Serve static videos
 app.use('/videos', express.static(path.join(__dirname, 'videos')));
 
 // Start server
