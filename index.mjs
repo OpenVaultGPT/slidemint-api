@@ -29,7 +29,7 @@ async function fetchImageAsCanvasImage(url) {
   }
 }
 
-async function createSlideshow(images, outputPath) {
+async function createSlideshow(images, outputPath, duration = 2) {
   const width = 720;
   const height = 1280;
   const duration = 2; // seconds per image
