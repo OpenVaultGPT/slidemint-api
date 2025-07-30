@@ -76,26 +76,36 @@ async function createSlideshow(images, outputPath, duration = 2) {
   }
 
   return new Promise((resolve, reject) => {
-    const inputs = path.join(tempFramesDir, 'frame-%03d.png');
-    const command = ffmpeg()
-      .input(inputs)
-      .inputFPS(1 / duration)
-      .outputFPS(30)
-      .videoCodec('libx264')
-      .outputOptions('-pix_fmt yuv420p')
-      .save(outputPath)
-      .on('start', (cmd) => console.log('🎬 FFmpeg started:', cmd))
-      .on('stderr', (line) => console.log('📦 FFmpeg:', line))
-      .on('end', () => {
-        console.log('✅ FFmpeg finished');
-        fs.rmSync(tempFramesDir, { recursive: true, force: true });
-        resolve();
-      })
-      .on('error', (err) => {
-        console.error('❌ FFmpeg error:', err.message);
-        reject(err);
-      });
-  });
+  const inputs = path.join(tempFramesDir, 'frame-%03d.png');
+
+  const command = ffmpeg()
+    .input(inputs)
+    .inputOptions([
+      '-framerate', (1 / duration).toFixed(2)
+    ])
+    .outputOptions([
+      '-vf', 'scale=720:-2',
+      '-r', '30',
+      '-preset', 'ultrafast',
+      '-pix_fmt', 'yuv420p',
+      '-movflags', '+faststart'
+    ])
+    .videoCodec('libx264')
+    .save(outputPath)
+    .on('start', (cmd) => console.log('🎬 FFmpeg started:', cmd))
+    .on('stderr', (line) => console.log('📦 FFmpeg:', line))
+    .on('end', () => {
+      console.log('✅ FFmpeg finished');
+      fs.rmSync(tempFramesDir, { recursive: true, force: true });
+      resolve();
+    })
+    .on('error', (err) => {
+      console.error('❌ FFmpeg error:', err.message);
+      reject(err);
+    });
+
+});
+
 }
 
 app.post('/generate', async (req, res) => {
