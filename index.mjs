@@ -8,14 +8,14 @@ import sharp from 'sharp';
 import { fileURLToPath } from 'url';
 import { v4 as uuidv4 } from 'uuid';
 
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
 const app = express();
 // Serve static files from /public so MP4s are directly accessible
 app.use(express.static(path.join(__dirname, 'public')));
 
 app.use(express.json());
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 
 // 🔧 Safe fetch + resize
 async function fetchImageAsCanvasImage(url) {
