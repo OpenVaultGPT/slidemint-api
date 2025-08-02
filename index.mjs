@@ -9,6 +9,9 @@ import { fileURLToPath } from 'url';
 import { v4 as uuidv4 } from 'uuid';
 
 const app = express();
+// Serve static files from /public so MP4s are directly accessible
+app.use(express.static(path.join(__dirname, 'public')));
+
 app.use(express.json());
 
 const __filename = fileURLToPath(import.meta.url);
@@ -118,7 +121,7 @@ app.post('/generate', async (req, res) => {
 
   const safeImageUrls = imageUrls.slice(0, 12); // ✅ Up to 12 images
   const videoId = uuidv4();
-  const outputPath = path.join(__dirname, 'videos', `${videoId}.mp4`);
+  const outputPath = path.join(__dirname, 'public', 'videos', `${videoId}.mp4`);
   fs.mkdirSync(path.dirname(outputPath), { recursive: true });
 
   try {
@@ -138,7 +141,6 @@ app.post('/generate', async (req, res) => {
   }
 });
 
-app.use('/videos', express.static(path.join(__dirname, 'videos')));
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
