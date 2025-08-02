@@ -134,7 +134,9 @@ app.post('/generate', async (req, res) => {
     console.timeEnd('🕒 Slideshow duration');
     console.log('🧠 Memory usage at end:', process.memoryUsage());
 
-    res.status(200).json({ videoUrl: `/videos/${videoId}.mp4` });
+    const baseUrl = 'https://promo-genie-api.onrender.com'; // ← or use env var for flexibility
+    res.status(200).json({ videoUrl: `${baseUrl}/videos/${videoId}.mp4` });
+
   } catch (err) {
     console.error('❌ Slideshow generation failed:', err.message);
     res.status(500).json({ error: 'Video generation failed' });
