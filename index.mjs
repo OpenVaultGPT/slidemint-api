@@ -134,7 +134,7 @@ app.post('/generate', async (req, res) => {
     console.timeEnd('🕒 Slideshow duration');
     console.log('🧠 Memory usage at end:', process.memoryUsage());
 
-    const baseUrl = 'https://promo-genie-api.onrender.com'; // ← or use env var for flexibility
+    const baseUrl = 'https://slidemint-api.onrender.com'; // ← or use env var for flexibility
 res.status(200).json({
   success: true,
   videoUrl: `${baseUrl}/videos/${videoId}.mp4`,
@@ -151,5 +151,5 @@ res.status(200).json({
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`🚀 PromoGenie backend running on port ${PORT}`);
+  console.log(`🚀 SlideMint backend running on port ${PORT}`);
 });
