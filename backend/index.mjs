@@ -111,39 +111,43 @@ async function createSlideshow(images, outputPath, duration = 2) {
 }
 
 // ✅ Existing route – direct video generation from images
-app.post('/generate', async (req, res) => {
-  const { imageUrls, duration = 2 } = req.body;
+// ✅ NEW route – forward itemId to Pipedream
+app.post('/generate-proxy', async (req, res) => {
+  const { itemId } = req.body;
 
-  if (!Array.isArray(imageUrls) || imageUrls.length === 0) {
-    return res.status(400).json({ error: 'No image URLs provided' });
+  console.log('📩 Received itemId:', itemId);
+
+  if (!itemId || !itemId.match(/^\d{9,12}$/)) {
+    console.error('❌ Invalid itemId:', itemId);
+    return res.status(400).json({ error: 'Invalid item ID' });
   }
 
-  const safeImageUrls = imageUrls.slice(0, 12);
-  const videoId = uuidv4();
-  const outputPath = path.join(__dirname, 'public', 'videos', `${videoId}.mp4`);
-  fs.mkdirSync(path.dirname(outputPath), { recursive: true });
-
   try {
-    console.log(`🎬 Generating video: ${videoId}`);
-    console.log('🧠 Memory usage at start:', process.memoryUsage());
-    console.time('🕒 Slideshow duration');
+    const pdRes = await fetch('https://eos21xm8bj17yt2.m.pipedream.net', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ items: [itemId] })
+    });
 
-    await createSlideshow(safeImageUrls, outputPath, duration);
+    const data = await pdRes.json();
 
-    console.timeEnd('🕒 Slideshow duration');
-    console.log('🧠 Memory usage at end:', process.memoryUsage());
+    console.log('📦 Response from Pipedream:', JSON.stringify(data, null, 2));
 
-    const baseUrl = 'https://slidemint-api.onrender.com';
-    res.status(200).json({
-      success: true,
-      videoUrl: `${baseUrl}/videos/${videoId}.mp4`,
-      placeholderVideoUrl: `${baseUrl}/videos/${videoId}.mp4`,
-      imageUrls: safeImageUrls
+    const { videoUrl, cleanedUrls } = data;
+
+    if (!videoUrl) {
+      console.error('❌ No videoUrl in response from Pipedream');
+      return res.status(500).json({ error: 'Video not generated' });
+    }
+
+    return res.status(200).json({
+      videoUrl,
+      cleanedUrls: cleanedUrls || []
     });
 
   } catch (err) {
-    console.error('❌ Slideshow generation failed:', err.message);
-    res.status(500).json({ error: 'Video generation failed' });
+    console.error('❌ Proxy error:', err.stack || err.message);
+    return res.status(500).json({ error: 'Pipedream request failed' });
   }
 });
 
