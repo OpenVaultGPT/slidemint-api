@@ -77,7 +77,7 @@ async function createSlideshow(images, outputPath, duration = 2) {
   return new Promise((resolve, reject) => {
     ffmpeg()
       .input(path.join(tempFramesDir, 'frame-%03d.png'))
-      .inputOptions(['-stream_loop', '1', '-framerate', (1 / duration).toFixed(2)])
+      .inputOptions(['-framerate', (1 / duration).toFixed(2)])
       .outputOptions([
         '-vf', 'scale=720:-2',
         '-r', '30',
@@ -101,7 +101,7 @@ async function createSlideshow(images, outputPath, duration = 2) {
   });
 }
 
-// 🔁 POST /generate-proxy → calls Pipedream → waits for Render
+// 🔁 Proxy route (frontend ➜ backend ➜ Pipedream ➜ Render)
 app.post("/generate-proxy", async (req, res) => {
   try {
     const { itemId } = req.body;
@@ -117,14 +117,25 @@ app.post("/generate-proxy", async (req, res) => {
       body: JSON.stringify({ items: [cleanId] })
     });
 
-    const rawText = await pdRes.text(); // only call .text() once
+    const contentType = pdRes.headers.get("content-type") || "";
+    const isJSON = contentType.includes("application/json");
 
-    let data = {};
+    let data;
+
+    if (!isJSON) {
+      const fallback = await pdRes.text();
+      console.error("❌ Pipedream returned non-JSON:", fallback.slice(0, 300));
+      return res.status(500).json({
+        error: "Malformed JSON from Pipedream",
+        fallback: fallback.slice(0, 300)
+      });
+    }
+
     try {
-      data = rawText ? JSON.parse(rawText) : {};
+      const text = await pdRes.text();
+      data = text ? JSON.parse(text) : {};
     } catch (err) {
-      console.error("❌ Failed to parse response from Pipedream:", err.message);
-      console.error("📦 Raw response:", rawText.slice(0, 500));
+      console.error("❌ Failed to parse JSON from Pipedream:", err.message);
       return res.status(500).json({ error: "Malformed JSON from Pipedream" });
     }
 
@@ -138,13 +149,39 @@ app.post("/generate-proxy", async (req, res) => {
     }
 
     return res.status(200).json({ videoUrl, cleanedUrls });
-
   } catch (err) {
     console.error("🔥 Final error in /generate-proxy:", err.stack || err.message);
     return res.status(500).json({ error: "Internal proxy error" });
   }
 });
 
-// ✅ POST /generate → called directly with images[]
+// ✅ Direct call with image array
 app.post("/generate", async (req, res) => {
-  const { imageUrls, duration } =
+  const { imageUrls, duration } = req.body;
+
+  if (!Array.isArray(imageUrls) || imageUrls.length === 0) {
+    return res.status(400).json({ error: 'Missing or invalid image URLs' });
+  }
+
+  try {
+    const outputDir = path.join(__dirname, 'public', 'videos');
+    fs.mkdirSync(outputDir, { recursive: true });
+
+    const videoFilename = `video-${uuidv4()}.mp4`;
+    const outputPath = path.join(outputDir, videoFilename);
+
+    await createSlideshow(imageUrls, outputPath, duration || 2);
+
+    const videoUrl = `https://slidemint-api.onrender.com/videos/${videoFilename}`;
+    return res.status(200).json({ videoUrl });
+  } catch (err) {
+    console.error('❌ Error generating video:', err.stack || err.message);
+    return res.status(500).json({ error: 'Video generation failed' });
+  }
+});
+
+// 🚀 Launch server
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`🚀 SlideMint backend running on port ${PORT}`);
+});
