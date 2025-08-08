@@ -117,10 +117,7 @@ app.post("/generate-proxy", async (req, res) => {
       body: JSON.stringify({ items: [cleanId] })
     });
 
-    const contentType = pdRes.headers.get("content-type") || "";
-    const isJSON = contentType.includes("application/json");
-
-    const rawText = await pdRes.text();
+    const rawText = await pdRes.text(); // only call .text() once
 
     let data = {};
     try {
@@ -131,7 +128,7 @@ app.post("/generate-proxy", async (req, res) => {
       return res.status(500).json({ error: "Malformed JSON from Pipedream" });
     }
 
-    console.log("✅ Parsed JSON from Pipedream:", data);
+    console.log("✅ Clean JSON from Pipedream:", data);
 
     const videoUrl = data.videoUrl || data.placeholderVideoUrl || null;
     const cleanedUrls = Array.isArray(data.cleanedUrls) ? data.cleanedUrls : [];
@@ -141,6 +138,7 @@ app.post("/generate-proxy", async (req, res) => {
     }
 
     return res.status(200).json({ videoUrl, cleanedUrls });
+
   } catch (err) {
     console.error("🔥 Final error in /generate-proxy:", err.stack || err.message);
     return res.status(500).json({ error: "Internal proxy error" });
@@ -149,31 +147,4 @@ app.post("/generate-proxy", async (req, res) => {
 
 // ✅ POST /generate → called directly with images[]
 app.post("/generate", async (req, res) => {
-  const { imageUrls, duration } = req.body;
-
-  if (!Array.isArray(imageUrls) || imageUrls.length === 0) {
-    return res.status(400).json({ error: 'Missing or invalid image URLs' });
-  }
-
-  try {
-    const outputDir = path.join(__dirname, 'public', 'videos');
-    fs.mkdirSync(outputDir, { recursive: true });
-
-    const videoFilename = `video-${uuidv4()}.mp4`;
-    const outputPath = path.join(outputDir, videoFilename);
-
-    await createSlideshow(imageUrls, outputPath, duration || 2);
-
-    const videoUrl = `https://slidemint-api.onrender.com/videos/${videoFilename}`;
-    return res.status(200).json({ videoUrl });
-  } catch (err) {
-    console.error('❌ Error generating video:', err.stack || err.message);
-    return res.status(500).json({ error: 'Video generation failed' });
-  }
-});
-
-// 🚀 Launch server
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`🚀 SlideMint backend running on port ${PORT}`);
-});
+  const { imageUrls, duration } =
