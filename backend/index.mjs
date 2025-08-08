@@ -12,9 +12,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-// Serve static files from /public so MP4s are directly accessible
 app.use(express.static(path.join(__dirname, 'public')));
-
 app.use(express.json());
 
 // 🔧 Safe fetch + resize
@@ -79,39 +77,38 @@ async function createSlideshow(images, outputPath, duration = 2) {
   }
 
   return new Promise((resolve, reject) => {
-  const inputs = path.join(tempFramesDir, 'frame-%03d.png');
+    const inputs = path.join(tempFramesDir, 'frame-%03d.png');
 
-  const command = ffmpeg()
-  .input(inputs)
-  .inputOptions([
-    '-stream_loop', '1', // ✅ Loop the input 1 extra time = play twice
-    '-framerate', (1 / duration).toFixed(2)
-  ])
-    .outputOptions([
-      '-vf', 'scale=720:-2',
-      '-r', '30',
-      '-preset', 'ultrafast',
-      '-pix_fmt', 'yuv420p',
-      '-movflags', '+faststart'
-    ])
-    .videoCodec('libx264')
-    .save(outputPath)
-    .on('start', (cmd) => console.log('🎬 FFmpeg started:', cmd))
-    .on('stderr', (line) => console.log('📦 FFmpeg:', line))
-    .on('end', () => {
-      console.log('✅ FFmpeg finished');
-      fs.rmSync(tempFramesDir, { recursive: true, force: true });
-      resolve();
-    })
-    .on('error', (err) => {
-      console.error('❌ FFmpeg error:', err.message);
-      reject(err);
-    });
-
-});
-
+    const command = ffmpeg()
+      .input(inputs)
+      .inputOptions([
+        '-stream_loop', '1',
+        '-framerate', (1 / duration).toFixed(2)
+      ])
+      .outputOptions([
+        '-vf', 'scale=720:-2',
+        '-r', '30',
+        '-preset', 'ultrafast',
+        '-pix_fmt', 'yuv420p',
+        '-movflags', '+faststart'
+      ])
+      .videoCodec('libx264')
+      .save(outputPath)
+      .on('start', (cmd) => console.log('🎬 FFmpeg started:', cmd))
+      .on('stderr', (line) => console.log('📦 FFmpeg:', line))
+      .on('end', () => {
+        console.log('✅ FFmpeg finished');
+        fs.rmSync(tempFramesDir, { recursive: true, force: true });
+        resolve();
+      })
+      .on('error', (err) => {
+        console.error('❌ FFmpeg error:', err.message);
+        reject(err);
+      });
+  });
 }
 
+// ✅ Existing route untouched
 app.post('/generate', async (req, res) => {
   const { imageUrls, duration = 2 } = req.body;
 
@@ -119,7 +116,7 @@ app.post('/generate', async (req, res) => {
     return res.status(400).json({ error: 'No image URLs provided' });
   }
 
-  const safeImageUrls = imageUrls.slice(0, 12); // ✅ Up to 12 images
+  const safeImageUrls = imageUrls.slice(0, 12);
   const videoId = uuidv4();
   const outputPath = path.join(__dirname, 'public', 'videos', `${videoId}.mp4`);
   fs.mkdirSync(path.dirname(outputPath), { recursive: true });
@@ -134,13 +131,13 @@ app.post('/generate', async (req, res) => {
     console.timeEnd('🕒 Slideshow duration');
     console.log('🧠 Memory usage at end:', process.memoryUsage());
 
-    const baseUrl = 'https://slidemint-api.onrender.com'; // ← or use env var for flexibility
-res.status(200).json({
-  success: true,
-  videoUrl: `${baseUrl}/videos/${videoId}.mp4`,
-  placeholderVideoUrl: `${baseUrl}/videos/${videoId}.mp4`,
-  imageUrls: safeImageUrls
-});
+    const baseUrl = 'https://slidemint-api.onrender.com';
+    res.status(200).json({
+      success: true,
+      videoUrl: `${baseUrl}/videos/${videoId}.mp4`,
+      placeholderVideoUrl: `${baseUrl}/videos/${videoId}.mp4`,
+      imageUrls: safeImageUrls
+    });
 
   } catch (err) {
     console.error('❌ Slideshow generation failed:', err.message);
@@ -148,6 +145,41 @@ res.status(200).json({
   }
 });
 
+// ✅ NEW route – safe addition
+app.post('/generate-from-ebay', async (req, res) => {
+  const { items } = req.body;
+  const itemId = items?.[0]?.match(/\d{9,12}/)?.[0];
+
+  if (!itemId) {
+    return res.status(400).json({ error: 'Invalid eBay item ID' });
+  }
+
+  try {
+    const ebayUrl = `https://www.ebay.co.uk/itm/${itemId}`;
+    const html = await fetch(ebayUrl).then(r => r.text());
+
+    const imageMatches = [...html.matchAll(/"mediaList":[\s\S]*?"url":"(https:\/\/i\.ebayimg\.com\/[^"]+)"/g)];
+    const urls = imageMatches.map(match => match[1].replace(/\\u0025/g, '%')).slice(0, 10);
+
+    if (!urls.length) {
+      return res.status(404).json({ error: 'No images found on listing' });
+    }
+
+    // Call your existing /generate endpoint internally
+    const response = await fetch(`http://localhost:${PORT}/generate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ imageUrls: urls })
+    });
+
+    const data = await response.json();
+    res.status(response.status).json(data);
+
+  } catch (err) {
+    console.error('❌ Failed to extract from eBay:', err.message);
+    res.status(500).json({ error: 'eBay parsing failed' });
+  }
+});
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
