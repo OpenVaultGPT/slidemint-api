@@ -7,11 +7,13 @@ import ffmpeg from 'fluent-ffmpeg';
 import sharp from 'sharp';
 import { fileURLToPath } from 'url';
 import { v4 as uuidv4 } from 'uuid';
+import cors from 'cors';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
+app.use(cors({ origin: 'https://app.slidemint.openvaultgpt.com' }));
 app.use(express.static(path.join(__dirname, 'public')));
 app.use(express.json());
 
