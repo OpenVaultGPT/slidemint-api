@@ -1,15 +1,19 @@
 {
-  "type": "module",
+  "name": "slidemint-api",
+  "version": "1.0.0",
+  "description": "SlideMint backend",
   "main": "index.mjs",
+  "type": "module",
   "scripts": {
     "start": "node index.mjs"
   },
   "dependencies": {
+    "canvas": "^2.11.2",
+    "cors": "^2.8.5",
     "express": "^4.18.2",
     "fluent-ffmpeg": "^2.1.2",
-    "node-fetch": "^2.6.11",
-    "sharp": "^0.33.3",
-    "uuid": "^9.0.1",
-    "canvas": "^2.11.2"
+    "node-fetch": "^2.6.7",
+    "sharp": "^0.32.6",
+    "uuid": "^9.0.0"
   }
 }
