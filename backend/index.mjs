@@ -104,42 +104,37 @@ async function createSlideshow(images, outputPath, duration = 2) {
 }
 
 // 🔁 Forward request to Pipedream → Render
-app.post('/generate-proxy', async (req, res) => {
+app.post("/generate-proxy", async (req, res) => {
   const { itemId } = req.body;
-  console.log('📩 Received itemId:', itemId);
 
-  if (!itemId || !itemId.match(/^\d{9,12}$/)) {
-    console.error('❌ Invalid itemId:', itemId);
-    return res.status(400).json({ error: 'Invalid item ID' });
+  if (!itemId) {
+    return res.status(400).json({ error: "Missing itemId in request" });
   }
 
   try {
-    const pdRes = await fetch('https://eos21xm8bj17yt2.m.pipedream.net', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ items: [itemId] }),
+    const pdRes = await fetch("https://eos21xm8bj17yt2.m.pipedream.net", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ items: [itemId] })
     });
 
-    const contentType = pdRes.headers.get('content-type') || '';
-    if (!contentType.includes('application/json')) {
-      const text = await pdRes.text();
-      console.error('❌ Pipedream returned non-JSON:', text.slice(0, 100));
-      return res.status(500).json({ error: 'Pipedream did not return valid JSON' });
-    }
-
     const data = await pdRes.json();
-    const { videoUrl, cleanedUrls } = data;
+    console.log("✅ Pipedream responded:", data);
+
+    // Handle fallback + type safety
+    const videoUrl = data.videoUrl || data.placeholderVideoUrl || null;
+    const cleanedUrls = Array.isArray(data.cleanedUrls) ? data.cleanedUrls : [];
 
     if (!videoUrl) {
-      console.error('❌ No videoUrl in Pipedream response');
-      return res.status(500).json({ error: 'Video not generated' });
+      console.error("❌ No videoUrl in Pipedream response");
+      return res.status(500).json({ error: "Video not generated" });
     }
 
-    return res.status(200).json({ videoUrl, cleanedUrls: cleanedUrls || [] });
+    return res.status(200).json({ videoUrl, cleanedUrls });
 
   } catch (err) {
-    console.error('❌ Proxy error:', err.stack || err.message);
-    return res.status(500).json({ error: 'Pipedream request failed' });
+    console.error("🔥 Error in /generate-proxy:", err);
+    return res.status(500).json({ error: "Internal server error" });
   }
 });
 
