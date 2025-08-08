@@ -14,7 +14,6 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 app.use(cors());
-
 app.use(express.static(path.join(__dirname, 'public')));
 app.use(express.json());
 
@@ -119,8 +118,9 @@ app.post("/generate-proxy", async (req, res) => {
     });
 
     const contentType = pdRes.headers.get("content-type") || "";
+    const isJSON = contentType.includes("application/json");
 
-    if (!contentType.includes("application/json")) {
+    if (!isJSON) {
       const fallback = await pdRes.text();
       console.error("❌ Pipedream returned non-JSON:", fallback.slice(0, 300));
       return res.status(500).json({
@@ -131,27 +131,28 @@ app.post("/generate-proxy", async (req, res) => {
 
     let data;
     try {
-      data = await pdRes.json();
-    } catch (jsonErr) {
-      console.error("❌ Failed to parse JSON from Pipedream:", jsonErr.message);
-      return res.status(500).json({ error: "Malformed JSON response from Pipedream" });
+      const text = await pdRes.text();
+      data = text ? JSON.parse(text) : {};
+    } catch (err) {
+      console.error("❌ Failed to parse JSON from Pipedream:", err.message);
+      return res.status(500).json({ error: "Malformed JSON from Pipedream" });
     }
 
-    console.log("✅ Pipedream responded:", data);
+    console.log("✅ Clean JSON from Pipedream:", data);
 
     const videoUrl = data.videoUrl || data.placeholderVideoUrl || null;
     const cleanedUrls = Array.isArray(data.cleanedUrls) ? data.cleanedUrls : [];
 
     if (!videoUrl || !videoUrl.startsWith("http")) {
-      return res.status(500).json({ error: "Invalid or missing videoUrl from Pipedream" });
+      return res.status(500).json({ error: "Invalid or missing videoUrl" });
     }
+
     return res.status(200).json({ videoUrl, cleanedUrls });
   } catch (err) {
-    console.error("🔥 Error in /generate-proxy:", err.stack || err.message);
+    console.error("🔥 Final error in /generate-proxy:", err.stack || err.message);
     return res.status(500).json({ error: "Internal proxy error" });
   }
 });
-
 
 // ✅ POST /generate → called directly with images[]
 app.post("/generate", async (req, res) => {
