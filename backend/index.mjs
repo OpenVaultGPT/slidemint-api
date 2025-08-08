@@ -110,8 +110,6 @@ async function createSlideshow(images, outputPath, duration = 2) {
   });
 }
 
-// ✅ Existing route – direct video generation from images
-// ✅ NEW route – forward itemId to Pipedream
 app.post('/generate-proxy', async (req, res) => {
   const { itemId } = req.body;
 
@@ -128,6 +126,13 @@ app.post('/generate-proxy', async (req, res) => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ items: [itemId] })
     });
+
+    const contentType = pdRes.headers.get('content-type') || '';
+    if (!contentType.includes('application/json')) {
+      const text = await pdRes.text();
+      console.error('❌ Pipedream returned non-JSON:', text.slice(0, 100));
+      return res.status(500).json({ error: 'Pipedream did not return valid JSON' });
+    }
 
     const data = await pdRes.json();
 
@@ -148,42 +153,6 @@ app.post('/generate-proxy', async (req, res) => {
   } catch (err) {
     console.error('❌ Proxy error:', err.stack || err.message);
     return res.status(500).json({ error: 'Pipedream request failed' });
-  }
-});
-
-// ✅ Existing route – scrape eBay listing and call /generate
-app.post('/generate-from-ebay', async (req, res) => {
-  const { items } = req.body;
-  const itemId = items?.[0]?.match(/\d{9,12}/)?.[0];
-
-  if (!itemId) {
-    return res.status(400).json({ error: 'Invalid eBay item ID' });
-  }
-
-  try {
-    const ebayUrl = `https://www.ebay.co.uk/itm/${itemId}`;
-    const html = await fetch(ebayUrl).then(r => r.text());
-
-    const imageMatches = [...html.matchAll(/"mediaList":[\s\S]*?"url":"(https:\/\/i\.ebayimg\.com\/[^"]+)"/g)];
-    const urls = imageMatches.map(match => match[1].replace(/\\u0025/g, '%')).slice(0, 10);
-
-    if (!urls.length) {
-      return res.status(404).json({ error: 'No images found on listing' });
-    }
-
-    // Call your existing /generate endpoint internally
-    const response = await fetch(`http://localhost:${PORT}/generate`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ imageUrls: urls })
-    });
-
-    const data = await response.json();
-    res.status(response.status).json(data);
-
-  } catch (err) {
-    console.error('❌ Failed to extract from eBay:', err.message);
-    res.status(500).json({ error: 'eBay parsing failed' });
   }
 });
 
