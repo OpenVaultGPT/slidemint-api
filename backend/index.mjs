@@ -119,31 +119,39 @@ app.post("/generate-proxy", async (req, res) => {
     });
 
     const contentType = pdRes.headers.get("content-type") || "";
-    if (!contentType.includes("application/json")) {
-  const fallback = await pdRes.text();
-  console.error("❌ Pipedream returned non-JSON:", fallback.slice(0, 300));
-  return res.status(500).json({
-    error: "Pipedream returned non-JSON (HTML or error)",
-    fallback: fallback.slice(0, 300) // include preview of the actual returned HTML
-  });
-}
 
-    const data = await pdRes.json();
+    if (!contentType.includes("application/json")) {
+      const fallback = await pdRes.text();
+      console.error("❌ Pipedream returned non-JSON:", fallback.slice(0, 300));
+      return res.status(500).json({
+        error: "Pipedream returned non-JSON (HTML or error)",
+        fallback: fallback.slice(0, 300)
+      });
+    }
+
+    let data;
+    try {
+      data = await pdRes.json();
+    } catch (jsonErr) {
+      console.error("❌ Failed to parse JSON from Pipedream:", jsonErr.message);
+      return res.status(500).json({ error: "Malformed JSON response from Pipedream" });
+    }
+
     console.log("✅ Pipedream responded:", data);
 
     const videoUrl = data.videoUrl || data.placeholderVideoUrl || null;
     const cleanedUrls = Array.isArray(data.cleanedUrls) ? data.cleanedUrls : [];
 
-    if (!videoUrl) {
-      return res.status(500).json({ error: "Missing videoUrl in response" });
+    if (!videoUrl || !videoUrl.startsWith("http")) {
+      return res.status(500).json({ error: "Invalid or missing videoUrl from Pipedream" });
     }
-
     return res.status(200).json({ videoUrl, cleanedUrls });
   } catch (err) {
     console.error("🔥 Error in /generate-proxy:", err.stack || err.message);
     return res.status(500).json({ error: "Internal proxy error" });
   }
 });
+
 
 // ✅ POST /generate → called directly with images[]
 app.post("/generate", async (req, res) => {
