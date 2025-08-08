@@ -120,10 +120,13 @@ app.post("/generate-proxy", async (req, res) => {
 
     const contentType = pdRes.headers.get("content-type") || "";
     if (!contentType.includes("application/json")) {
-      const fallback = await pdRes.text();
-      console.error("❌ Pipedream returned non-JSON:", fallback.slice(0, 300));
-      return res.status(500).json({ error: "Pipedream returned non-JSON (HTML or error)" });
-    }
+  const fallback = await pdRes.text();
+  console.error("❌ Pipedream returned non-JSON:", fallback.slice(0, 300));
+  return res.status(500).json({
+    error: "Pipedream returned non-JSON (HTML or error)",
+    fallback: fallback.slice(0, 300) // include preview of the actual returned HTML
+  });
+}
 
     const data = await pdRes.json();
     console.log("✅ Pipedream responded:", data);
