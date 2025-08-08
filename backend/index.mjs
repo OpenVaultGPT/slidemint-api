@@ -156,38 +156,6 @@ app.post('/generate-proxy', async (req, res) => {
   }
 });
 
-// ✅ NEW route – forward itemId to Pipedream
-app.post('/generate-proxy', async (req, res) => {
-  const { itemId } = req.body;
-
-  if (!itemId || !itemId.match(/^\d{9,12}$/)) {
-    return res.status(400).json({ error: 'Invalid item ID' });
-  }
-
-  try {
-    const pdRes = await fetch('https://eos21xm8bj17yt2.m.pipedream.net', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ items: [itemId] })
-    });
-
-    const data = await pdRes.json();
-
-    if (!data.videoUrl) {
-      return res.status(500).json({ error: 'Video not generated' });
-    }
-
-    res.status(200).json({
-      videoUrl: data.videoUrl,
-      cleanedUrls: data.cleanedUrls || []
-    });
-
-  } catch (err) {
-    console.error('❌ Proxy error:', err.message);
-    res.status(500).json({ error: 'Pipedream request failed' });
-  }
-});
-
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 SlideMint backend running on port ${PORT}`);
