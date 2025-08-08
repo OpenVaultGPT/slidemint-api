@@ -120,25 +120,18 @@ app.post("/generate-proxy", async (req, res) => {
     const contentType = pdRes.headers.get("content-type") || "";
     const isJSON = contentType.includes("application/json");
 
-    if (!isJSON) {
-      const fallback = await pdRes.text();
-      console.log("📦 Raw Pipedream response text:", text.slice(0, 500));
-      return res.status(500).json({
-        error: "Pipedream returned non-JSON (HTML or error)",
-        fallback: fallback.slice(0, 300)
-      });
-    }
+    const rawText = await pdRes.text();
 
-    let data;
+    let data = {};
     try {
-      const text = await pdRes.text();
-      data = text ? JSON.parse(text) : {};
+      data = rawText ? JSON.parse(rawText) : {};
     } catch (err) {
-      console.error("❌ Failed to parse JSON from Pipedream:", err.message);
+      console.error("❌ Failed to parse response from Pipedream:", err.message);
+      console.error("📦 Raw response:", rawText.slice(0, 500));
       return res.status(500).json({ error: "Malformed JSON from Pipedream" });
     }
 
-    console.log("✅ Clean JSON from Pipedream:", data);
+    console.log("✅ Parsed JSON from Pipedream:", data);
 
     const videoUrl = data.videoUrl || data.placeholderVideoUrl || null;
     const cleanedUrls = Array.isArray(data.cleanedUrls) ? data.cleanedUrls : [];
