@@ -122,7 +122,7 @@ app.post("/generate-proxy", async (req, res) => {
 
     if (!isJSON) {
       const fallback = await pdRes.text();
-      console.error("❌ Pipedream returned non-JSON:", fallback.slice(0, 300));
+      console.log("📦 Raw Pipedream response text:", text.slice(0, 500));
       return res.status(500).json({
         error: "Pipedream returned non-JSON (HTML or error)",
         fallback: fallback.slice(0, 300)
