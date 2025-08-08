@@ -14,15 +14,14 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 
-// 🔐 Allow requests from frontend only
 app.use(cors({ origin: 'https://app.slidemint.openvaultgpt.com' }));
 app.use(express.static(path.join(__dirname, 'public')));
 app.use(express.json());
 
-// ✅ Healthcheck endpoint
+// ✅ Healthcheck
 app.get('/health', (_, res) => res.status(200).send('OK'));
 
-// 📥 Fetch and resize image safely
+// 📥 Safe image fetch + resize
 async function fetchImageAsCanvasImage(url) {
   try {
     const response = await fetch(url, { timeout: 8000 });
@@ -36,7 +35,7 @@ async function fetchImageAsCanvasImage(url) {
   }
 }
 
-// 🎞️ Create slideshow video from image list
+// 🎞️ Build slideshow
 async function createSlideshow(images, outputPath, duration = 2) {
   const width = 720;
   const height = 1280;
@@ -103,43 +102,48 @@ async function createSlideshow(images, outputPath, duration = 2) {
   });
 }
 
-// 🔁 Forward request to Pipedream → Render
+// 🔁 POST /generate-proxy → calls Pipedream → waits for Render
 app.post("/generate-proxy", async (req, res) => {
-  const { itemId } = req.body;
-
-  if (!itemId) {
-    return res.status(400).json({ error: "Missing itemId in request" });
-  }
-
   try {
+    const { itemId } = req.body;
+    const cleanId = itemId?.match(/\d{9,12}/)?.[0];
+
+    if (!cleanId) {
+      return res.status(400).json({ error: "Invalid eBay item ID" });
+    }
+
     const pdRes = await fetch("https://eos21xm8bj17yt2.m.pipedream.net", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ items: [itemId] })
+      body: JSON.stringify({ items: [cleanId] })
     });
+
+    const contentType = pdRes.headers.get("content-type") || "";
+    if (!contentType.includes("application/json")) {
+      const fallback = await pdRes.text();
+      console.error("❌ Pipedream returned non-JSON:", fallback.slice(0, 300));
+      return res.status(500).json({ error: "Pipedream returned non-JSON (HTML or error)" });
+    }
 
     const data = await pdRes.json();
     console.log("✅ Pipedream responded:", data);
 
-    // Handle fallback + type safety
     const videoUrl = data.videoUrl || data.placeholderVideoUrl || null;
     const cleanedUrls = Array.isArray(data.cleanedUrls) ? data.cleanedUrls : [];
 
     if (!videoUrl) {
-      console.error("❌ No videoUrl in Pipedream response");
-      return res.status(500).json({ error: "Video not generated" });
+      return res.status(500).json({ error: "Missing videoUrl in response" });
     }
 
     return res.status(200).json({ videoUrl, cleanedUrls });
-
   } catch (err) {
-    console.error("🔥 Error in /generate-proxy:", err);
-    return res.status(500).json({ error: "Internal server error" });
+    console.error("🔥 Error in /generate-proxy:", err.stack || err.message);
+    return res.status(500).json({ error: "Internal proxy error" });
   }
 });
 
-// ✅ New POST /generate route
-app.post('/generate', async (req, res) => {
+// ✅ POST /generate → called directly with images[]
+app.post("/generate", async (req, res) => {
   const { imageUrls, duration } = req.body;
 
   if (!Array.isArray(imageUrls) || imageUrls.length === 0) {
@@ -163,7 +167,7 @@ app.post('/generate', async (req, res) => {
   }
 });
 
-// 🚀 Start server
+// 🚀 Launch server
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 SlideMint backend running on port ${PORT}`);
