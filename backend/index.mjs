@@ -13,29 +13,30 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
+
+// 🔐 Allow requests from frontend only
 app.use(cors({ origin: 'https://app.slidemint.openvaultgpt.com' }));
 app.use(express.static(path.join(__dirname, 'public')));
 app.use(express.json());
 
-// 🔧 Safe fetch + resize
+// ✅ Healthcheck endpoint
+app.get('/health', (_, res) => res.status(200).send('OK'));
+
+// 📥 Fetch and resize image safely
 async function fetchImageAsCanvasImage(url) {
   try {
     const response = await fetch(url, { timeout: 8000 });
     if (!response.ok) throw new Error(`Image fetch failed: ${url}`);
     const buffer = await response.buffer();
-
-    const resized = await sharp(buffer)
-      .resize({ width: 720 })
-      .png()
-      .toBuffer();
-
+    const resized = await sharp(buffer).resize({ width: 720 }).png().toBuffer();
     return await loadImage(resized);
   } catch (err) {
-    console.error(`❌ Failed image: ${url} – ${err.message}`);
+    console.error(`❌ Failed to process image: ${url}`, err.message);
     return null;
   }
 }
 
+// 🎞️ Create slideshow video from image list
 async function createSlideshow(images, outputPath, duration = 2) {
   const width = 720;
   const height = 1280;
@@ -43,12 +44,11 @@ async function createSlideshow(images, outputPath, duration = 2) {
   fs.mkdirSync(tempFramesDir, { recursive: true });
 
   for (let i = 0; i < images.length; i++) {
-    console.log(`🖼️ Rendering image ${i + 1} of ${images.length}`);
+    console.log(`🖼️ Rendering image ${i + 1}/${images.length}`);
     const img = await fetchImageAsCanvasImage(images[i]);
 
     const canvas = createCanvas(width, height);
     const ctx = canvas.getContext('2d');
-
     ctx.fillStyle = '#000';
     ctx.fillRect(0, 0, width, height);
 
@@ -56,12 +56,10 @@ async function createSlideshow(images, outputPath, duration = 2) {
       const aspect = img.width / img.height;
       let drawWidth = width;
       let drawHeight = width / aspect;
-
       if (drawHeight > height) {
         drawHeight = height;
         drawWidth = height * aspect;
       }
-
       const x = (width - drawWidth) / 2;
       const y = (height - drawHeight) / 2;
       ctx.drawImage(img, x, y, drawWidth, drawHeight);
@@ -79,40 +77,35 @@ async function createSlideshow(images, outputPath, duration = 2) {
   }
 
   return new Promise((resolve, reject) => {
-    const inputs = path.join(tempFramesDir, 'frame-%03d.png');
-
-    const command = ffmpeg()
-      .input(inputs)
-      .inputOptions([
-        '-stream_loop', '1',
-        '-framerate', (1 / duration).toFixed(2)
-      ])
+    ffmpeg()
+      .input(path.join(tempFramesDir, 'frame-%03d.png'))
+      .inputOptions(['-stream_loop', '1', '-framerate', (1 / duration).toFixed(2)])
       .outputOptions([
         '-vf', 'scale=720:-2',
         '-r', '30',
         '-preset', 'ultrafast',
         '-pix_fmt', 'yuv420p',
-        '-movflags', '+faststart'
+        '-movflags', '+faststart',
       ])
       .videoCodec('libx264')
       .save(outputPath)
-      .on('start', (cmd) => console.log('🎬 FFmpeg started:', cmd))
-      .on('stderr', (line) => console.log('📦 FFmpeg:', line))
+      .on('start', cmd => console.log('🎬 FFmpeg started:', cmd))
+      .on('stderr', line => console.log('📦 FFmpeg:', line))
       .on('end', () => {
         console.log('✅ FFmpeg finished');
         fs.rmSync(tempFramesDir, { recursive: true, force: true });
         resolve();
       })
-      .on('error', (err) => {
+      .on('error', err => {
         console.error('❌ FFmpeg error:', err.message);
         reject(err);
       });
   });
 }
 
+// 🔁 Forward request to Pipedream → Render
 app.post('/generate-proxy', async (req, res) => {
   const { itemId } = req.body;
-
   console.log('📩 Received itemId:', itemId);
 
   if (!itemId || !itemId.match(/^\d{9,12}$/)) {
@@ -124,7 +117,7 @@ app.post('/generate-proxy', async (req, res) => {
     const pdRes = await fetch('https://eos21xm8bj17yt2.m.pipedream.net', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ items: [itemId] })
+      body: JSON.stringify({ items: [itemId] }),
     });
 
     const contentType = pdRes.headers.get('content-type') || '';
@@ -135,20 +128,14 @@ app.post('/generate-proxy', async (req, res) => {
     }
 
     const data = await pdRes.json();
-
-    console.log('📦 Response from Pipedream:', JSON.stringify(data, null, 2));
-
     const { videoUrl, cleanedUrls } = data;
 
     if (!videoUrl) {
-      console.error('❌ No videoUrl in response from Pipedream');
+      console.error('❌ No videoUrl in Pipedream response');
       return res.status(500).json({ error: 'Video not generated' });
     }
 
-    return res.status(200).json({
-      videoUrl,
-      cleanedUrls: cleanedUrls || []
-    });
+    return res.status(200).json({ videoUrl, cleanedUrls: cleanedUrls || [] });
 
   } catch (err) {
     console.error('❌ Proxy error:', err.stack || err.message);
@@ -156,6 +143,7 @@ app.post('/generate-proxy', async (req, res) => {
   }
 });
 
+// 🚀 Start server
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 SlideMint backend running on port ${PORT}`);
