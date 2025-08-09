@@ -15,10 +15,14 @@ const __dirname = path.dirname(__filename);
 const app = express();
 app.use(cors());
 app.use(express.static(path.join(__dirname, 'public')));
-app.use(express.json());
+app.use(express.json({ limit: '1mb' }));
+
+// ---- config ----
+const PIPEDREAM_URL = process.env.PIPEDREAM_URL || 'https://eos21xm8bj17yt2.m.pipedream.net';
+const FETCH_TIMEOUT_MS = Number(process.env.PD_TIMEOUT_MS || 60000);
 
 // ✅ Healthcheck
-app.get('/health', (_, res) => res.status(200).send('OK'));
+app.get('/health', (_, res) => res.status(200).json({ ok: true, service: 'slidemint-api', ts: new Date().toISOString() }));
 
 // 📥 Safe image fetch + resize
 async function fetchImageAsCanvasImage(url) {
@@ -101,62 +105,130 @@ async function createSlideshow(images, outputPath, duration = 2) {
   });
 }
 
-// 🔁 Proxy route (frontend ➜ backend ➜ Pipedream ➜ Render)
-app.post("/generate-proxy", async (req, res) => {
+// ---- helpers for Pipedream proxy ----
+async function fetchWithTimeout(url, options = {}, timeoutMs = FETCH_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const { itemId } = req.body;
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+async function parsePipedreamResponse(res) {
+  const ct = (res.headers.get('content-type') || '').toLowerCase();
+
+  // Try JSON if content-type shows it
+  if (ct.includes('application/json')) {
+    try {
+      const json = await res.json();
+      return { kind: 'json', status: res.status, body: json };
+    } catch {
+      // fall through
+    }
+  }
+
+  // Otherwise read text and try to JSON.parse it
+  const text = await res.text();
+  try {
+    const json = JSON.parse(text);
+    return { kind: 'json', status: res.status, body: json };
+  } catch {
+    return { kind: 'text', status: res.status, body: text };
+  }
+}
+
+// 🔁 Proxy route (frontend ➜ backend ➜ Pipedream)
+app.post('/generate-proxy', async (req, res) => {
+  try {
+    const { itemId, images, duration } = req.body || {};
     const cleanId = itemId?.match(/\d{9,12}/)?.[0];
 
-    if (!cleanId) {
-      return res.status(400).json({ error: "Invalid eBay item ID" });
-    }
-
-    const pdRes = await fetch("https://eos21xm8bj17yt2.m.pipedream.net", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ items: [cleanId] })
-    });
-
-    const contentType = pdRes.headers.get("content-type") || "";
-    const isJSON = contentType.includes("application/json");
-
-    let data;
-
-    if (!isJSON) {
-      const fallback = await pdRes.text();
-      console.error("❌ Pipedream returned non-JSON:", fallback.slice(0, 300));
-      return res.status(500).json({
-        error: "Malformed JSON from Pipedream",
-        fallback: fallback.slice(0, 300)
+    if (!cleanId && !(Array.isArray(images) && images.length)) {
+      return res.status(400).json({
+        ok: false,
+        code: 'BAD_REQUEST',
+        message: 'Provide a valid eBay itemId or images[].',
+        detail: { received: Object.keys(req.body || {}) },
       });
     }
 
-    try {
-      const text = await pdRes.text();
-      data = text ? JSON.parse(text) : {};
-    } catch (err) {
-      console.error("❌ Failed to parse JSON from Pipedream:", err.message);
-      return res.status(500).json({ error: "Malformed JSON from Pipedream" });
+    const pdRes = await fetchWithTimeout(
+      PIPEDREAM_URL,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',          // reduce HTML fallbacks
+          'User-Agent': 'SlideMint-API/1.0',
+        },
+        // Keep your existing PD payload shape (items array)
+        body: JSON.stringify(cleanId ? { items: [cleanId], duration } : { images, duration }),
+      },
+      FETCH_TIMEOUT_MS
+    );
+
+    const parsed = await parsePipedreamResponse(pdRes);
+
+    // JSON + 2xx -> pass through
+    if (parsed.kind === 'json' && pdRes.ok) {
+      const videoUrl = parsed.body.videoUrl || parsed.body.placeholderVideoUrl || null;
+      const cleanedUrls = Array.isArray(parsed.body.cleanedUrls) ? parsed.body.cleanedUrls : [];
+
+      if (!videoUrl || !/^https?:\/\//i.test(videoUrl)) {
+        return res.status(502).json({
+          ok: false,
+          code: 'NO_VIDEO_URL',
+          message: 'Missing or invalid videoUrl from Pipedream.',
+          detail: { parsed: parsed.body },
+          _meta: { source: 'pipedream', status: parsed.status },
+        });
+      }
+
+      return res.status(200).json({
+        ok: parsed.body.ok !== false,
+        videoUrl,
+        cleanedUrls,
+        _meta: { source: 'pipedream', status: parsed.status },
+      });
     }
 
-    console.log("✅ Clean JSON from Pipedream:", data);
-
-    const videoUrl = data.videoUrl || data.placeholderVideoUrl || null;
-    const cleanedUrls = Array.isArray(data.cleanedUrls) ? data.cleanedUrls : [];
-
-    if (!videoUrl || !videoUrl.startsWith("http")) {
-      return res.status(500).json({ error: "Invalid or missing videoUrl" });
+    // JSON + non-2xx -> normalize as error JSON
+    if (parsed.kind === 'json' && !pdRes.ok) {
+      return res.status(502).json({
+        ok: false,
+        code: parsed.body.code || 'PIPEDREAM_ERROR',
+        message: parsed.body.message || 'Pipedream responded with an error.',
+        detail: parsed.body,
+        _meta: { source: 'pipedream', status: parsed.status },
+      });
     }
 
-    return res.status(200).json({ videoUrl, cleanedUrls });
+    // TEXT/HTML -> wrap safely
+    const preview = typeof parsed.body === 'string' ? parsed.body.slice(0, 500) : '';
+    console.error('❌ Pipedream returned non-JSON:', preview);
+    return res.status(502).json({
+      ok: false,
+      code: 'PIPEDREAM_NON_JSON',
+      message: 'Pipedream returned non-JSON (HTML or text).',
+      detail: { preview },
+      _meta: { source: 'pipedream', status: parsed.status },
+    });
   } catch (err) {
-    console.error("🔥 Final error in /generate-proxy:", err.stack || err.message);
-    return res.status(500).json({ error: "Internal proxy error" });
+    const isAbort = err?.name === 'AbortError';
+    console.error('🔥 /generate-proxy error:', err?.stack || err?.message || err);
+    return res.status(isAbort ? 504 : 500).json({
+      ok: false,
+      code: isAbort ? 'PIPEDREAM_TIMEOUT' : 'PROXY_EXCEPTION',
+      message: isAbort ? 'Pipedream request timed out.' : 'Unexpected proxy error.',
+      detail: isAbort ? { timeoutMs: FETCH_TIMEOUT_MS } : { error: String(err) },
+    });
   }
 });
 
-// ✅ Direct call with image array
-app.post("/generate", async (req, res) => {
+// ✅ Direct call with image array (kept intact)
+app.post('/generate', async (req, res) => {
   const { imageUrls, duration } = req.body;
 
   if (!Array.isArray(imageUrls) || imageUrls.length === 0) {
