@@ -22,15 +22,23 @@ const PIPEDREAM_URL = process.env.PIPEDREAM_URL || 'https://eos21xm8bj17yt2.m.pi
 const FETCH_TIMEOUT_MS = Number(process.env.PD_TIMEOUT_MS || 60000);
 
 // ✅ Healthcheck
-app.get('/health', (_, res) => res.status(200).json({ ok: true, service: 'slidemint-api', ts: new Date().toISOString() }));
+app.get('/health', (_, res) =>
+  res.status(200).json({ ok: true, service: 'slidemint-api', ts: new Date().toISOString() })
+);
 
-// 📥 Safe image fetch + resize
+// 📥 Safe image fetch + resize (bigger headroom for Ken Burns)
 async function fetchImageAsCanvasImage(url) {
   try {
     const response = await fetch(url, { timeout: 8000 });
     if (!response.ok) throw new Error(`Image fetch failed: ${url}`);
     const buffer = await response.buffer();
-    const resized = await sharp(buffer).resize({ width: 720 }).png().toBuffer();
+
+    // Headroom for zoom/pan; do not upscale beyond source
+    const resized = await sharp(buffer)
+      .resize({ width: 1440, withoutEnlargement: true })
+      .png()
+      .toBuffer();
+
     return await loadImage(resized);
   } catch (err) {
     console.error(`❌ Failed to process image: ${url}`, err.message);
@@ -38,71 +46,143 @@ async function fetchImageAsCanvasImage(url) {
   }
 }
 
-// 🎞️ Build slideshow
+// 🎞️ Build slideshow (Ken Burns + autoplay 2x)
 async function createSlideshow(images, outputPath, duration = 2) {
-  const width = 720;
+  const width = 720;   // portrait output to suit eBay phone view
   const height = 1280;
+  const fps = 30;
+  const framesPerSlide = Math.max(1, Math.round((duration || 2) * fps));
+  const repeatCount = 2; // play whole sequence twice
+
   const tempFramesDir = path.join(__dirname, 'frames', uuidv4());
   fs.mkdirSync(tempFramesDir, { recursive: true });
 
-  for (let i = 0; i < images.length; i++) {
-    console.log(`🖼️ Rendering image ${i + 1}/${images.length}`);
-    const img = await fetchImageAsCanvasImage(images[i]);
+  // Preload images
+  const loaded = await Promise.all(images.map(u => fetchImageAsCanvasImage(u)));
 
-    const canvas = createCanvas(width, height);
-    const ctx = canvas.getContext('2d');
+  // simple smooth easing
+  const easeInOut = (t) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
+
+  // Draw one frame with gentle pan/zoom
+  function drawKenBurnsFrame(ctx, img, slideIdx, frameIdx, totalFrames) {
+    // background
     ctx.fillStyle = '#000';
     ctx.fillRect(0, 0, width, height);
 
-    if (img) {
-      const aspect = img.width / img.height;
-      let drawWidth = width;
-      let drawHeight = width / aspect;
-      if (drawHeight > height) {
-        drawHeight = height;
-        drawWidth = height * aspect;
-      }
-      const x = (width - drawWidth) / 2;
-      const y = (height - drawHeight) / 2;
-      ctx.drawImage(img, x, y, drawWidth, drawHeight);
-    } else {
+    if (!img) {
       ctx.fillStyle = '#111';
       ctx.fillRect(0, 0, width, height);
       ctx.fillStyle = '#fff';
       ctx.font = 'bold 36px sans-serif';
       ctx.textAlign = 'center';
       ctx.fillText('⚠️ Image failed to load', width / 2, height / 2);
+      return;
     }
 
-    const framePath = path.join(tempFramesDir, `frame-${String(i).padStart(3, '0')}.png`);
-    fs.writeFileSync(framePath, canvas.toBuffer('image/png'));
+    const t = easeInOut(totalFrames > 1 ? frameIdx / (totalFrames - 1) : 0);
+
+    // cover-scale to fill canvas; then add gentle zoom
+    const cover = Math.max(width / img.width, height / img.height);
+    const startZ = 1.05; // subtle
+    const endZ = 1.12;
+    const zoom = cover * (slideIdx % 2 === 0
+      ? startZ + (endZ - startZ) * t
+      : endZ + (startZ - endZ) * t);
+
+    const dw = img.width * zoom;
+    const dh = img.height * zoom;
+
+    // pan patterns: L→R, T→B, R→L, B→T
+    let x, y;
+    switch (slideIdx % 4) {
+      case 0: // left → right
+        x = (width - dw) * t;
+        y = (height - dh) / 2;
+        break;
+      case 1: // top → bottom
+        x = (width - dw) / 2;
+        y = (height - dh) * t;
+        break;
+      case 2: // right → left
+        x = (width - dw) * (1 - t);
+        y = (height - dh) / 2;
+        break;
+      default: // bottom → top
+        x = (width - dw) / 2;
+        y = (height - dh) * (1 - t);
+        break;
+    }
+
+    // draw
+    ctx.drawImage(
+      img,
+      Math.round(x),
+      Math.round(y),
+      Math.round(dw),
+      Math.round(dh)
+    );
   }
 
-  return new Promise((resolve, reject) => {
-    ffmpeg()
-      .input(path.join(tempFramesDir, 'frame-%03d.png'))
-      .inputOptions(['-framerate', (1 / duration).toFixed(2)])
-    .outputOptions([
-  '-vf', 'scale=720:-2',
-  '-r', '30',
-  '-preset', 'ultrafast',
-  '-pix_fmt', 'yuv420p',
-  '-movflags', '+faststart',
-])
-      .videoCodec('libx264')
-      .save(outputPath)
-      .on('start', cmd => console.log('🎬 FFmpeg started:', cmd))
-      .on('stderr', line => console.log('📦 FFmpeg:', line))
-      .on('end', () => {
-        console.log('✅ FFmpeg finished');
-        fs.rmSync(tempFramesDir, { recursive: true, force: true });
-        resolve();
-      })
-      .on('error', err => {
-        console.error('❌ FFmpeg error:', err.message);
-        reject(err);
-      });
-  });
+  // Render frames (loop sequence twice)
+  let globalFrame = 0;
+  try {
+    for (let loop = 0; loop < repeatCount; loop++) {
+      for (let i = 0; i < loaded.length; i++) {
+        const img = loaded[i];
+        for (let f = 0; f < framesPerSlide; f++) {
+          const canvas = createCanvas(width, height);
+          const ctx = canvas.getContext('2d');
+          drawKenBurnsFrame(ctx, img, i, f, framesPerSlide);
+
+          const framePath = path.join(
+            tempFramesDir,
+            `frame-${String(globalFrame).padStart(5, '0')}.png`
+          );
+          fs.writeFileSync(framePath, canvas.toBuffer('image/png'));
+          globalFrame++;
+        }
+      }
+    }
+
+    // Stitch frames → MP4 (safe, eBay-friendly, no exotic filters)
+    await new Promise((resolve, reject) => {
+      ffmpeg()
+        .input(path.join(tempFramesDir, 'frame-%05d.png'))
+        .inputOptions(['-framerate', String(fps)])
+        .outputOptions([
+          // keep it simple: frames are already 720x1280
+          '-r', String(fps),
+
+          // standard H.264; preset bumped for quality vs ultrafast
+          '-c:v', 'libx264',
+          '-pix_fmt', 'yuv420p',
+          '-preset', 'medium',
+          '-b:v', '5M',
+
+          // (optional but safe) small extra hints — uncomment if you want after first test:
+          // '-profile:v', 'high',
+          // '-level', '4.0',
+          // '-g', '60',
+          // '-bf', '3',
+
+          '-movflags', '+faststart'
+        ])
+        .save(outputPath)
+        .on('start', cmd => console.log('🎬 FFmpeg started:', cmd))
+        .on('stderr', line => console.log('📦 FFmpeg:', line))
+        .on('end', () => {
+          console.log('✅ FFmpeg finished');
+          resolve();
+        })
+        .on('error', err => {
+          console.error('❌ FFmpeg error:', err.message);
+          reject(err);
+        });
+    });
+  } finally {
+    // clean up temp frames
+    try { fs.rmSync(tempFramesDir, { recursive: true, force: true }); } catch {}
+  }
 }
 
 // ---- helpers for Pipedream proxy ----
@@ -119,17 +199,13 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = FETCH_TIMEOUT_MS)
 async function parsePipedreamResponse(res) {
   const ct = (res.headers.get('content-type') || '').toLowerCase();
 
-  // Try JSON if content-type shows it
   if (ct.includes('application/json')) {
     try {
       const json = await res.json();
       return { kind: 'json', status: res.status, body: json };
-    } catch {
-      // fall through
-    }
+    } catch { /* fall through */ }
   }
 
-  // Otherwise read text and try to JSON.parse it
   const text = await res.text();
   try {
     const json = JSON.parse(text);
@@ -160,10 +236,9 @@ app.post('/generate-proxy', async (req, res) => {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Accept': 'application/json',          // reduce HTML fallbacks
+          'Accept': 'application/json',
           'User-Agent': 'SlideMint-API/1.0',
         },
-        // Keep your existing PD payload shape (items array)
         body: JSON.stringify(cleanId ? { items: [cleanId], duration } : { images, duration }),
       },
       FETCH_TIMEOUT_MS
@@ -171,7 +246,6 @@ app.post('/generate-proxy', async (req, res) => {
 
     const parsed = await parsePipedreamResponse(pdRes);
 
-    // JSON + 2xx -> pass through
     if (parsed.kind === 'json' && pdRes.ok) {
       const videoUrl = parsed.body.videoUrl || parsed.body.placeholderVideoUrl || null;
       const cleanedUrls = Array.isArray(parsed.body.cleanedUrls) ? parsed.body.cleanedUrls : [];
@@ -194,7 +268,6 @@ app.post('/generate-proxy', async (req, res) => {
       });
     }
 
-    // JSON + non-2xx -> normalize as error JSON
     if (parsed.kind === 'json' && !pdRes.ok) {
       return res.status(502).json({
         ok: false,
@@ -205,7 +278,6 @@ app.post('/generate-proxy', async (req, res) => {
       });
     }
 
-    // TEXT/HTML -> wrap safely
     const preview = typeof parsed.body === 'string' ? parsed.body.slice(0, 500) : '';
     console.error('❌ Pipedream returned non-JSON:', preview);
     return res.status(502).json({
