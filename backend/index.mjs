@@ -138,26 +138,26 @@ async function createSlideshow(images, outputPath, duration = DEFAULT_DURATION) 
 }
 
 // ----------------------------------------------
-// STRICT eBay image normaliser (gallery-only, hi-res, dedup, cap 12)
-// ----------------------------------------------
+// Accept /images/... and legacy /00/s/... patterns, force s-l1600.jpg, strip queries
 function normalizeEbayUrl(u) {
   try {
     const url = new URL(u);
 
-    // Require eBay CDN
-    if (!/\.ebayimg\.com$/i.test(url.hostname)) return null;
+    // eBay CDN only
+    if (!/(^|\.)ebayimg\.com$/i.test(url.hostname)) return null;
 
-    // Require gallery-style path
-    if (!/\/images\//i.test(url.pathname)) return null;
+    // Must look like gallery: either /images/... or legacy /00/s/...
+    if (!(/\/images\//i.test(url.pathname) || /\/\d{2}\/s\//i.test(url.pathname))) return null;
 
-    // Force high-res variant
+    // Remove query cruft like ?set_id=...
+    url.search = "";
+
+    // Upgrade variants to s-l1600.jpg (normalize extension)
     url.pathname = url.pathname
-      .replace(/\/s-l\d+\.(jpg|jpeg|png|webp)$/i, '/s-l1600.$1')
-      .replace(/\/w\d+\.(jpg|jpeg|png|webp)$/i, '/s-l1600.$1')
-      .replace(/\/h\d+\.(jpg|jpeg|png|webp)$/i, '/s-l1600.$1');
-
-    // Strip query cruft (?set_id=… etc.)
-    url.search = '';
+      .replace(/\/s-l\d+\.(jpg|jpeg|png|webp)$/i, "/s-l1600.jpg")
+      .replace(/\/w\d+\.(jpg|jpeg|png|webp)$/i,  "/s-l1600.jpg")
+      .replace(/\/h\d+\.(jpg|jpeg|png|webp)$/i,  "/s-l1600.jpg")
+      .replace(/\/\$_\d+\.(jpg|jpeg|png|webp)$/i, "/s-l1600.jpg"); // $_57.JPG style
 
     return url.toString();
   } catch {
