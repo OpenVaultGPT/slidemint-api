@@ -19,8 +19,8 @@ app.use(express.static(path.join(__dirname, 'public')));
 app.use(express.json({ limit: '1mb' }));
 
 // ---- Config ----
-const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || 'https://slidemint-api.onrender.com').replace(/\/$/, '');
-const PIPEDREAM_URL   = process.env.PIPEDREAM_URL   || 'https://eos21xm8bj17yt2.m.pipedream.net';
+const PUBLIC_BASE_URL  = (process.env.PUBLIC_BASE_URL || 'https://slidemint-api.onrender.com').replace(/\/$/, '');
+const PIPEDREAM_URL    = process.env.PIPEDREAM_URL || 'https://eos21xm8bj17yt2.m.pipedream.net';
 const FETCH_TIMEOUT_MS = Number(process.env.PD_TIMEOUT_MS || 180000);
 
 // Slideshow constants (no Ken Burns)
@@ -33,7 +33,11 @@ const MIN_DURATION = 0.5;
 // ---- Healthcheck ----
 app.get('/health', (_, res) => res.status(200).json({ ok: true, service: 'slidemint-api', ts: new Date().toISOString() }));
 
-// ---- Helpers ----
+// ============================================================================
+// Helpers
+// ============================================================================
+
+// Hi-res upgrader (kept for generic use)
 function toHiResEbay(url) {
   try {
     const u = new URL(url);
@@ -80,6 +84,7 @@ async function prepareSlidePng(url, outPath) {
 function writeConcatList(slideFiles, durations, listPath) {
   const lines = ['ffconcat version 1.0'];
   slideFiles.forEach((f, i) => { lines.push(`file '${f}'`); lines.push(`duration ${durations[i].toFixed(6)}`); });
+  // Last file repeated per ffconcat spec
   lines.push(`file '${slideFiles[slideFiles.length - 1]}'`);
   fs.writeFileSync(listPath, lines.join('\n'));
 }
@@ -132,7 +137,53 @@ async function createSlideshow(images, outputPath, duration = DEFAULT_DURATION) 
   }
 }
 
-// ---- Pipedream proxy (unchanged) ----
+// ----------------------------------------------
+// STRICT eBay image normaliser (gallery-only, hi-res, dedup, cap 12)
+// ----------------------------------------------
+function normalizeEbayUrl(u) {
+  try {
+    const url = new URL(u);
+
+    // Require eBay CDN
+    if (!/\.ebayimg\.com$/i.test(url.hostname)) return null;
+
+    // Require gallery-style path
+    if (!/\/images\//i.test(url.pathname)) return null;
+
+    // Force high-res variant
+    url.pathname = url.pathname
+      .replace(/\/s-l\d+\.(jpg|jpeg|png|webp)$/i, '/s-l1600.$1')
+      .replace(/\/w\d+\.(jpg|jpeg|png|webp)$/i, '/s-l1600.$1')
+      .replace(/\/h\d+\.(jpg|jpeg|png|webp)$/i, '/s-l1600.$1');
+
+    // Strip query cruft (?set_id=… etc.)
+    url.search = '';
+
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
+function cleanEbayImages(arr) {
+  const seen = new Set();
+  const out = [];
+  for (const raw of Array.isArray(arr) ? arr : []) {
+    if (typeof raw !== 'string') continue;
+    const n = normalizeEbayUrl(raw);
+    if (!n) continue;
+    const key = new URL(n).pathname.toLowerCase(); // dedupe by path
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(n);
+    if (out.length >= 12) break; // hard cap
+  }
+  return out;
+}
+
+// ============================================================================
+// Optional Pipedream proxy (unchanged flow-wise)
+// ============================================================================
 async function fetchWithTimeout(url, options = {}, timeoutMs = FETCH_TIMEOUT_MS) {
   const controller = new AbortController();
   const t = setTimeout(() => controller.abort(), timeoutMs);
@@ -201,7 +252,9 @@ app.post('/generate', async (req, res) => {
   }
 });
 
-// ================== NEW: Async job endpoints (best/safest path) ==================
+// ============================================================================
+// Async jobs API
+// ============================================================================
 const jobs = new Map(); // jobId -> { status:'queued'|'running'|'done'|'error', url?, error? }
 
 async function runJob(jobId, images, duration) {
@@ -219,20 +272,27 @@ async function runJob(jobId, images, duration) {
   }
 }
 
-// Enqueue (returns immediately with jobId)
+// Enqueue (strict: max 12 s-l1600 eBay gallery images)
 app.post('/jobs', (req, res) => {
   const { imageUrls, duration } = req.body || {};
-  if (!Array.isArray(imageUrls) || imageUrls.length === 0) {
-    return res.status(400).json({ ok:false, message:'imageUrls[] required' });
+  const cleaned = cleanEbayImages(imageUrls);
+
+  if (!cleaned.length) {
+    return res.status(400).json({
+      ok: false,
+      message: 'imageUrls[] required (eBay gallery images only)',
+      detail: { hint: 'Provide https://i.ebayimg.com/.../s-l*.jpg under /images/ paths.' }
+    });
   }
+
   const jobId = uuidv4();
   jobs.set(jobId, { status: 'queued' });
   // fire-and-forget
-  runJob(jobId, imageUrls, duration);
-  return res.status(202).json({ ok:true, jobId });
+  runJob(jobId, cleaned, duration);
+  return res.status(202).json({ ok: true, jobId, count: cleaned.length });
 });
 
-// Poll status (resilient to restarts / instance hops)
+// Poll status (resilient to restarts / multi-instance)
 app.get('/jobs/:id', (req, res) => {
   const id = req.params.id;
   const j = jobs.get(id);
@@ -241,8 +301,7 @@ app.get('/jobs/:id', (req, res) => {
     return res.status(200).json({ ok: true, ...j });
   }
 
-  // Fallback: if the process restarted or a different instance handled the POST,
-  // check if the output file exists and return "done".
+  // Fallback: if RAM state is gone, check if file exists
   const outputDir = path.join(__dirname, 'public', 'videos');
   const videoFilename = `video-${id}.mp4`;
   const videoPath = path.join(outputDir, videoFilename);
@@ -257,7 +316,7 @@ app.get('/jobs/:id', (req, res) => {
     }
   } catch {}
 
-  // Not in memory and no file yet — treat as still queued (don’t 404).
+  // Not found yet → treat as queued (don't 404)
   return res.status(200).json({ ok: true, status: 'queued' });
 });
 
