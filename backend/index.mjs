@@ -1,6 +1,5 @@
 // index.mjs
 import express from 'express';
-import { createCanvas, loadImage } from 'canvas';
 import fetch from 'node-fetch';
 import fs from 'fs';
 import os from 'os';
@@ -14,184 +13,140 @@ import cors from 'cors';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// -------------------- Config --------------------
+// -------------------- App & Config --------------------
 const app = express();
 app.use(cors());
 app.use(express.static(path.join(__dirname, 'public')));
 app.use(express.json({ limit: '1mb' }));
 
-// Public base (for returned video URLs)
 const PUBLIC_BASE_URL =
   process.env.PUBLIC_BASE_URL || 'https://slidemint-api.onrender.com';
 
-// Pipedream proxy
 const PIPEDREAM_URL =
   process.env.PIPEDREAM_URL || 'https://eos21xm8bj17yt2.m.pipedream.net';
 
-// Proxy timeout (default 3 min to avoid premature aborts)
+// Default proxy timeout (you can override with env)
 const FETCH_TIMEOUT_MS = Number(process.env.PD_TIMEOUT_MS || 180000);
 
-// Slideshow/render constants tuned for speed + quality
+// Slideshow constants (no Ken Burns)
 const OUTPUT_WIDTH = 720;
 const OUTPUT_HEIGHT = 1280;
-const FPS = 24;                 // smooth, fewer frames than 30
-const DEFAULT_DURATION = 2;     // seconds per slide (before capping)
-const MAX_FRAMES_PER_SLIDE = 45;// hard cap (~2s @ 24fps)
-const SRC_MAX_WIDTH = 1280;     // resize sources to reduce IO (still sharp for 720p)
+const FPS = 24;                 // smooth and light
+const DEFAULT_DURATION = 2;     // seconds per slide
+const MIN_DURATION = 0.5;       // guardrails
+const SRC_MAX_SIDE = 1600;      // limit source resize work (faster I/O)
 
 // -------------------- Healthcheck --------------------
 app.get('/health', (_, res) =>
   res.status(200).json({ ok: true, service: 'slidemint-api', ts: new Date().toISOString() })
 );
 
-// -------------------- Image fetch + resize --------------------
-async function fetchImageAsCanvasImage(url) {
+// -------------------- Fetch helpers --------------------
+async function fetchBufferWithTimeout(url, timeoutMs = 12000) {
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const response = await fetch(url, { timeout: 8000 });
-    if (!response.ok) throw new Error(`Image fetch failed: ${url}`);
-    const buffer = await response.buffer();
-
-    // Resize down to reduce IO; do not upscale beyond source
-    const resized = await sharp(buffer)
-      .resize({ width: SRC_MAX_WIDTH, withoutEnlargement: true })
-      .png()
-      .toBuffer();
-
-    return await loadImage(resized);
-  } catch (err) {
-    console.error(`❌ Failed to process image: ${url}`, err.message);
-    return null;
+    const r = await fetch(url, { signal: controller.signal });
+    if (!r.ok) throw new Error(`Fetch failed ${r.status} for ${url}`);
+    return await r.buffer();
+  } finally {
+    clearTimeout(t);
   }
 }
 
-// -------------------- Slideshow (Ken Burns, single pass) --------------------
-async function createSlideshow(images, outputPath, duration = DEFAULT_DURATION) {
-  const framesPerSlide = Math.min(
-    MAX_FRAMES_PER_SLIDE,
-    Math.max(1, Math.round((duration || DEFAULT_DURATION) * FPS))
-  );
+// Resize a remote image to EXACT 720x1280 (cover fit), save PNG
+async function prepareSlidePng(url, outPath) {
+  const src = await fetchBufferWithTimeout(url);
+  // Pre-shrink very large sources to keep CPU/memory low, then cover-fit to output
+  const pre = await sharp(src)
+    .resize(SRC_MAX_SIDE, SRC_MAX_SIDE, { fit: 'inside', withoutEnlargement: true })
+    .toBuffer();
 
+  const png = await sharp(pre)
+    .resize(OUTPUT_WIDTH, OUTPUT_HEIGHT, { fit: 'cover', position: 'centre' })
+    .png()
+    .toBuffer();
+
+  fs.writeFileSync(outPath, png);
+}
+
+// Build an FFconcat list file with per-slide durations
+function writeConcatList(slideFiles, durations, listPath) {
+  const lines = ['ffconcat version 1.0'];
+  slideFiles.forEach((f, i) => {
+    lines.push(`file '${f}'`);
+    lines.push(`duration ${durations[i].toFixed(6)}`);
+  });
+  // Repeat last file without duration to finalize stream per ffconcat spec
+  lines.push(`file '${slideFiles[slideFiles.length - 1]}'`);
+  fs.writeFileSync(listPath, lines.join('\n'));
+}
+
+// -------------------- Slideshow (stills + concat) --------------------
+async function createSlideshow(images, outputPath, duration = DEFAULT_DURATION) {
   if (!Array.isArray(images) || images.length === 0) {
     throw new Error('No images provided');
   }
 
-  // Use OS temp dir for faster disk and auto-clean by platform
-  const tempFramesDir = path.join(os.tmpdir(), 'slidemint-frames', uuidv4());
-  fs.mkdirSync(tempFramesDir, { recursive: true });
+  const tmpDir = path.join(os.tmpdir(), 'slidemint-stills', uuidv4());
+  fs.mkdirSync(tmpDir, { recursive: true });
 
-  // Preload images
-  const loaded = await Promise.all(images.map(u => fetchImageAsCanvasImage(u)));
-
-  // Easing for gentle motion
-  const easeInOut = (t) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
-
-  function drawKenBurnsFrame(ctx, img, slideIdx, frameIdx, totalFrames) {
-    // background
-    ctx.fillStyle = '#000';
-    ctx.fillRect(0, 0, OUTPUT_WIDTH, OUTPUT_HEIGHT);
-
-    if (!img) {
-      ctx.fillStyle = '#111';
-      ctx.fillRect(0, 0, OUTPUT_WIDTH, OUTPUT_HEIGHT);
-      ctx.fillStyle = '#fff';
-      ctx.font = 'bold 36px sans-serif';
-      ctx.textAlign = 'center';
-      ctx.fillText('⚠️ Image failed to load', OUTPUT_WIDTH / 2, OUTPUT_HEIGHT / 2);
-      return;
-    }
-
-    const t = totalFrames > 1 ? easeInOut(frameIdx / (totalFrames - 1)) : 0;
-
-    // Cover-scale to fill canvas; subtle zoom to keep encode friendly
-    const cover = Math.max(OUTPUT_WIDTH / img.width, OUTPUT_HEIGHT / img.height);
-    const startZ = 1.03;
-    const endZ = 1.08;
-    const zoom = cover * (slideIdx % 2 === 0
-      ? startZ + (endZ - startZ) * t
-      : endZ + (startZ - endZ) * t);
-
-    const dw = img.width * zoom;
-    const dh = img.height * zoom;
-
-    // pan patterns: L→R, T→B, R→L, B→T
-    let x, y;
-    switch (slideIdx % 4) {
-      case 0: // left → right
-        x = (OUTPUT_WIDTH - dw) * t;
-        y = (OUTPUT_HEIGHT - dh) / 2;
-        break;
-      case 1: // top → bottom
-        x = (OUTPUT_WIDTH - dw) / 2;
-        y = (OUTPUT_HEIGHT - dh) * t;
-        break;
-      case 2: // right → left
-        x = (OUTPUT_WIDTH - dw) * (1 - t);
-        y = (OUTPUT_HEIGHT - dh) / 2;
-        break;
-      default: // bottom → top
-        x = (OUTPUT_WIDTH - dw) / 2;
-        y = (OUTPUT_HEIGHT - dh) * (1 - t);
-        break;
-    }
-
-    ctx.drawImage(
-      img,
-      Math.round(x),
-      Math.round(y),
-      Math.round(dw),
-      Math.round(dh)
-    );
-  }
-
-  // Render frames (single pass — no x2 loop)
-  let globalFrame = 0;
+  const slideFiles = [];
   try {
-    for (let i = 0; i < loaded.length; i++) {
-      const img = loaded[i];
-      for (let f = 0; f < framesPerSlide; f++) {
-        const canvas = createCanvas(OUTPUT_WIDTH, OUTPUT_HEIGHT);
-        const ctx = canvas.getContext('2d');
-        drawKenBurnsFrame(ctx, img, i, f, framesPerSlide);
-
-        const framePath = path.join(
-          tempFramesDir,
-          `frame-${String(globalFrame).padStart(5, '0')}.png`
-        );
-        fs.writeFileSync(framePath, canvas.toBuffer('image/png'));
-        globalFrame++;
+    // 1) Prepare still PNGs (one per image)
+    for (let i = 0; i < images.length; i++) {
+      const slidePath = path.join(tmpDir, `slide-${String(i).padStart(3, '0')}.png`);
+      try {
+        await prepareSlidePng(images[i], slidePath);
+        slideFiles.push(slidePath);
+      } catch (e) {
+        console.error('⚠️ slide prep failed, skipping:', images[i], e.message);
       }
     }
 
-    // Stitch frames → MP4 (eBay-friendly)
+    if (slideFiles.length === 0) throw new Error('All images failed to load');
+
+    // 2) Per-slide durations
+    const per = Math.max(MIN_DURATION, Number(duration) || DEFAULT_DURATION);
+    const durations = slideFiles.map(() => per);
+
+    // 3) Concat list for ffmpeg
+    const listPath = path.join(tmpDir, 'list.ffconcat');
+    writeConcatList(slideFiles, durations, listPath);
+
+    // 4) Encode (fast, eBay-safe)
     await new Promise((resolve, reject) => {
       ffmpeg()
-        .input(path.join(tempFramesDir, 'frame-%05d.png'))
-        .inputOptions(['-framerate', String(FPS)])
+        .input(listPath)
+        .inputOptions(['-safe', '0', '-f', 'concat'])
+        .videoFilters([
+          `fps=${FPS}`,
+          `setsar=1`
+        ])
         .outputOptions([
           '-r', String(FPS),
           '-c:v', 'libx264',
           '-pix_fmt', 'yuv420p',
           '-preset', 'medium',
-          // CRF + cap plays nice with marketplace transcoders
           '-crf', '21',
           '-maxrate', '5M',
           '-bufsize', '10M',
           '-movflags', '+faststart'
         ])
         .size(`${OUTPUT_WIDTH}x${OUTPUT_HEIGHT}`)
-        .save(outputPath)
-        .on('start', cmd => console.log('🎬 FFmpeg started:', cmd))
-        .on('stderr', line => console.log('📦 FFmpeg:', line))
-        .on('end', () => { console.log('✅ FFmpeg finished'); resolve(); })
-        .on('error', err => { console.error('❌ FFmpeg error:', err.message); reject(err); });
+        .on('start', c => console.log('🎬 FFmpeg:', c))
+        .on('stderr', l => console.log('📦', l))
+        .on('end', resolve)
+        .on('error', reject)
+        .save(outputPath);
     });
   } finally {
-    // Best-effort cleanup
-    try { fs.rmSync(tempFramesDir, { recursive: true, force: true }); } catch {}
+    // Cleanup temp dir
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
   }
 }
 
-// -------------------- Helpers for Pipedream proxy --------------------
+// -------------------- Pipedream proxy helpers --------------------
 async function fetchWithTimeout(url, options = {}, timeoutMs = FETCH_TIMEOUT_MS) {
   const controller = new AbortController();
   const t = setTimeout(() => controller.abort(), timeoutMs);
@@ -209,7 +164,7 @@ async function parsePipedreamResponse(res) {
     try {
       const json = await res.json();
       return { kind: 'json', status: res.status, body: json };
-    } catch { /* fall through */ }
+    } catch { /* ignore */ }
   }
 
   const text = await res.text();
