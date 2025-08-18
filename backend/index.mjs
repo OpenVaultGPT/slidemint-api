@@ -20,7 +20,7 @@ app.use(cors());
 app.use(express.static(path.join(__dirname, 'public')));
 app.use(express.json({ limit: '1mb' }));
 
-// Where your public videos can be fetched from (for response links)
+// Public base (for returned video URLs)
 const PUBLIC_BASE_URL =
   process.env.PUBLIC_BASE_URL || 'https://slidemint-api.onrender.com';
 
@@ -28,17 +28,16 @@ const PUBLIC_BASE_URL =
 const PIPEDREAM_URL =
   process.env.PIPEDREAM_URL || 'https://eos21xm8bj17yt2.m.pipedream.net';
 
-// Proxy timeout (default lifted to 3 min to avoid premature aborts)
+// Proxy timeout (default 3 min to avoid premature aborts)
 const FETCH_TIMEOUT_MS = Number(process.env.PD_TIMEOUT_MS || 180000);
 
 // Slideshow/render constants tuned for speed + quality
 const OUTPUT_WIDTH = 720;
 const OUTPUT_HEIGHT = 1280;
-const FPS = 24; // smooth, fewer frames than 30
-const DEFAULT_DURATION = 2; // seconds per slide (before capping)
-const MAX_FRAMES_PER_SLIDE = 45; // hard cap (~2s @ 24fps)
-const REPEAT_COUNT = 2; // loop whole sequence twice
-const SRC_MAX_WIDTH = 1280; // resize sources to reduce IO (still sharp for 720p)
+const FPS = 24;                 // smooth, fewer frames than 30
+const DEFAULT_DURATION = 2;     // seconds per slide (before capping)
+const MAX_FRAMES_PER_SLIDE = 45;// hard cap (~2s @ 24fps)
+const SRC_MAX_WIDTH = 1280;     // resize sources to reduce IO (still sharp for 720p)
 
 // -------------------- Healthcheck --------------------
 app.get('/health', (_, res) =>
@@ -65,12 +64,16 @@ async function fetchImageAsCanvasImage(url) {
   }
 }
 
-// -------------------- Slideshow (Ken Burns + loop x2) --------------------
+// -------------------- Slideshow (Ken Burns, single pass) --------------------
 async function createSlideshow(images, outputPath, duration = DEFAULT_DURATION) {
   const framesPerSlide = Math.min(
     MAX_FRAMES_PER_SLIDE,
     Math.max(1, Math.round((duration || DEFAULT_DURATION) * FPS))
   );
+
+  if (!Array.isArray(images) || images.length === 0) {
+    throw new Error('No images provided');
+  }
 
   // Use OS temp dir for faster disk and auto-clean by platform
   const tempFramesDir = path.join(os.tmpdir(), 'slidemint-frames', uuidv4());
@@ -140,24 +143,22 @@ async function createSlideshow(images, outputPath, duration = DEFAULT_DURATION) 
     );
   }
 
-  // Render frames (loop sequence twice)
+  // Render frames (single pass — no x2 loop)
   let globalFrame = 0;
   try {
-    for (let loop = 0; loop < REPEAT_COUNT; loop++) {
-      for (let i = 0; i < loaded.length; i++) {
-        const img = loaded[i];
-        for (let f = 0; f < framesPerSlide; f++) {
-          const canvas = createCanvas(OUTPUT_WIDTH, OUTPUT_HEIGHT);
-          const ctx = canvas.getContext('2d');
-          drawKenBurnsFrame(ctx, img, i, f, framesPerSlide);
+    for (let i = 0; i < loaded.length; i++) {
+      const img = loaded[i];
+      for (let f = 0; f < framesPerSlide; f++) {
+        const canvas = createCanvas(OUTPUT_WIDTH, OUTPUT_HEIGHT);
+        const ctx = canvas.getContext('2d');
+        drawKenBurnsFrame(ctx, img, i, f, framesPerSlide);
 
-          const framePath = path.join(
-            tempFramesDir,
-            `frame-${String(globalFrame).padStart(5, '0')}.png`
-          );
-          fs.writeFileSync(framePath, canvas.toBuffer('image/png'));
-          globalFrame++;
-        }
+        const framePath = path.join(
+          tempFramesDir,
+          `frame-${String(globalFrame).padStart(5, '0')}.png`
+        );
+        fs.writeFileSync(framePath, canvas.toBuffer('image/png'));
+        globalFrame++;
       }
     }
 
@@ -171,7 +172,7 @@ async function createSlideshow(images, outputPath, duration = DEFAULT_DURATION) 
           '-c:v', 'libx264',
           '-pix_fmt', 'yuv420p',
           '-preset', 'medium',
-          // Use CRF with a safety ceiling for marketplaces
+          // CRF + cap plays nice with marketplace transcoders
           '-crf', '21',
           '-maxrate', '5M',
           '-bufsize', '10M',
@@ -181,14 +182,8 @@ async function createSlideshow(images, outputPath, duration = DEFAULT_DURATION) 
         .save(outputPath)
         .on('start', cmd => console.log('🎬 FFmpeg started:', cmd))
         .on('stderr', line => console.log('📦 FFmpeg:', line))
-        .on('end', () => {
-          console.log('✅ FFmpeg finished');
-          resolve();
-        })
-        .on('error', err => {
-          console.error('❌ FFmpeg error:', err.message);
-          reject(err);
-        });
+        .on('end', () => { console.log('✅ FFmpeg finished'); resolve(); })
+        .on('error', err => { console.error('❌ FFmpeg error:', err.message); reject(err); });
     });
   } finally {
     // Best-effort cleanup
