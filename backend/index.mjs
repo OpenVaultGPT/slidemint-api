@@ -83,30 +83,29 @@ async function createSlideshow(images, outputPath, duration = 2) {
       .input(path.join(tempFramesDir, 'frame-%03d.png'))
       .inputOptions(['-framerate', (1 / duration).toFixed(2)])
      .outputOptions([
-  // Pre-scale with a high-quality filter and light anti-alias
-  // (controls the downscale so eBay's transcode has less to ruin)
-  '-vf', 'fps=30,scale=720:1280:flags=lanczos+accurate_rnd+full_chroma_int,format=yuv420p,boxblur=0.8:0.8',
+  // Pre-scale + set pixel format (safe, widely supported)
+  '-vf', 'fps=30,scale=720:1280:flags=lanczos,format=yuv420p',
 
-  // Stable 30fps output
+  // Stable output frame rate
   '-r', '30',
 
-  // H.264 settings that survive platform re-encodes better
-  '-preset', 'slow',         // swap 'ultrafast' → 'slow' for quality
+  // H.264 settings that survive platform re-encodes
+  '-preset', 'medium',        // use 'slow' later if CPU allows
   '-profile:v', 'high',
   '-level', '4.0',
   '-pix_fmt', 'yuv420p',
-  '-g', '60',                // 2s GOP at 30fps
-  '-bf', '3',                // allow B-frames (better compression)
+  '-g', '60',                 // 2s GOP
+  '-bf', '3',
 
-  // Bitrate with a small ceiling; good balance for a second encode
+  // Bitrate headroom (good for second encode on eBay)
   '-b:v', '5M',
   '-maxrate', '6M',
   '-bufsize', '10M',
 
-  // Optimise for slideshows / stills
+  // Optimized for slides/stills
   '-tune', 'stillimage',
 
-  // Web-friendly MP4
+  // Fast start for web players
   '-movflags', '+faststart'
 ])
       .videoCodec('libx264')
