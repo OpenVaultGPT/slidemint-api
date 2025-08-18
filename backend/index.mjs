@@ -82,13 +82,33 @@ async function createSlideshow(images, outputPath, duration = 2) {
     ffmpeg()
       .input(path.join(tempFramesDir, 'frame-%03d.png'))
       .inputOptions(['-framerate', (1 / duration).toFixed(2)])
-      .outputOptions([
-        '-vf', 'scale=720:-2',
-        '-r', '30',
-        '-preset', 'ultrafast',
-        '-pix_fmt', 'yuv420p',
-        '-movflags', '+faststart',
-      ])
+     .outputOptions([
+  // Pre-scale with a high-quality filter and light anti-alias
+  // (controls the downscale so eBay's transcode has less to ruin)
+  '-vf', 'fps=30,scale=720:1280:flags=lanczos+accurate_rnd+full_chroma_int,format=yuv420p,boxblur=0.8:0.8',
+
+  // Stable 30fps output
+  '-r', '30',
+
+  // H.264 settings that survive platform re-encodes better
+  '-preset', 'slow',         // swap 'ultrafast' → 'slow' for quality
+  '-profile:v', 'high',
+  '-level', '4.0',
+  '-pix_fmt', 'yuv420p',
+  '-g', '60',                // 2s GOP at 30fps
+  '-bf', '3',                // allow B-frames (better compression)
+
+  // Bitrate with a small ceiling; good balance for a second encode
+  '-b:v', '5M',
+  '-maxrate', '6M',
+  '-bufsize', '10M',
+
+  // Optimise for slideshows / stills
+  '-tune', 'stillimage',
+
+  // Web-friendly MP4
+  '-movflags', '+faststart'
+])
       .videoCodec('libx264')
       .save(outputPath)
       .on('start', cmd => console.log('🎬 FFmpeg started:', cmd))
