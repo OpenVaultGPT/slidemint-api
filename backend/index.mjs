@@ -25,23 +25,34 @@ const PUBLIC_BASE_URL =
 const PIPEDREAM_URL =
   process.env.PIPEDREAM_URL || 'https://eos21xm8bj17yt2.m.pipedream.net';
 
-// Default proxy timeout (you can override with env)
 const FETCH_TIMEOUT_MS = Number(process.env.PD_TIMEOUT_MS || 180000);
 
 // Slideshow constants (no Ken Burns)
 const OUTPUT_WIDTH = 720;
 const OUTPUT_HEIGHT = 1280;
-const FPS = 24;                 // smooth and light
+const FPS = 24;                 // smooth + light
 const DEFAULT_DURATION = 2;     // seconds per slide
-const MIN_DURATION = 0.5;       // guardrails
-const SRC_MAX_SIDE = 1600;      // limit source resize work (faster I/O)
+const MIN_DURATION = 0.5;       // guardrail
 
 // -------------------- Healthcheck --------------------
 app.get('/health', (_, res) =>
   res.status(200).json({ ok: true, service: 'slidemint-api', ts: new Date().toISOString() })
 );
 
-// -------------------- Fetch helpers --------------------
+// -------------------- Helpers --------------------
+function toHiResEbay(url) {
+  try {
+    const u = new URL(url);
+    // Upgrade common eBay thumbnail patterns to the largest standard image
+    u.pathname = u.pathname
+      .replace(/\/s-l\d+\./i, '/s-l1600.')
+      .replace(/(w|h)\d+\./gi, 'w1600.');
+    return u.toString();
+  } catch {
+    return url;
+  }
+}
+
 async function fetchBufferWithTimeout(url, timeoutMs = 12000) {
   const controller = new AbortController();
   const t = setTimeout(() => controller.abort(), timeoutMs);
@@ -54,20 +65,33 @@ async function fetchBufferWithTimeout(url, timeoutMs = 12000) {
   }
 }
 
-// Resize a remote image to EXACT 720x1280 (cover fit), save PNG
+// Prepare one PNG slide: blurred BG (cover) + sharp FG (contain, no upscaling)
 async function prepareSlidePng(url, outPath) {
-  const src = await fetchBufferWithTimeout(url);
-  // Pre-shrink very large sources to keep CPU/memory low, then cover-fit to output
-  const pre = await sharp(src)
-    .resize(SRC_MAX_SIDE, SRC_MAX_SIDE, { fit: 'inside', withoutEnlargement: true })
+  const hi = toHiResEbay(url);
+  const srcBuf = await fetchBufferWithTimeout(hi);
+
+  // Background: cover-fit, strong blur, slight darken for contrast
+  const bg = await sharp(srcBuf)
+    .resize(OUTPUT_WIDTH, OUTPUT_HEIGHT, { fit: 'cover', position: 'centre' })
+    .blur(20)
+    .modulate({ brightness: 0.86, saturation: 1 })
     .toBuffer();
 
-  const png = await sharp(pre)
-    .resize(OUTPUT_WIDTH, OUTPUT_HEIGHT, { fit: 'cover', position: 'centre' })
+  // Foreground: contain-fit, never upscale
+  const fgBuf = await sharp(srcBuf)
+    .resize(OUTPUT_WIDTH, OUTPUT_HEIGHT, { fit: 'inside', withoutEnlargement: true })
+    .toBuffer();
+
+  const fgMeta = await sharp(fgBuf).metadata();
+  const left = Math.round((OUTPUT_WIDTH  - (fgMeta.width  || 0)) / 2);
+  const top  = Math.round((OUTPUT_HEIGHT - (fgMeta.height || 0)) / 2);
+
+  const final = await sharp(bg)
+    .composite([{ input: fgBuf, top, left }])
     .png()
     .toBuffer();
 
-  fs.writeFileSync(outPath, png);
+  fs.writeFileSync(outPath, final);
 }
 
 // Build an FFconcat list file with per-slide durations
@@ -77,7 +101,7 @@ function writeConcatList(slideFiles, durations, listPath) {
     lines.push(`file '${f}'`);
     lines.push(`duration ${durations[i].toFixed(6)}`);
   });
-  // Repeat last file without duration to finalize stream per ffconcat spec
+  // Repeat last file to finalize stream (ffconcat spec)
   lines.push(`file '${slideFiles[slideFiles.length - 1]}'`);
   fs.writeFileSync(listPath, lines.join('\n'));
 }
@@ -93,14 +117,15 @@ async function createSlideshow(images, outputPath, duration = DEFAULT_DURATION) 
 
   const slideFiles = [];
   try {
-    // 1) Prepare still PNGs (one per image)
+    // 1) Prepare still PNGs
     for (let i = 0; i < images.length; i++) {
+      const src = images[i];
       const slidePath = path.join(tmpDir, `slide-${String(i).padStart(3, '0')}.png`);
       try {
-        await prepareSlidePng(images[i], slidePath);
+        await prepareSlidePng(src, slidePath);
         slideFiles.push(slidePath);
       } catch (e) {
-        console.error('⚠️ slide prep failed, skipping:', images[i], e.message);
+        console.error('⚠️ slide prep failed, skipping:', src, e.message);
       }
     }
 
@@ -110,7 +135,7 @@ async function createSlideshow(images, outputPath, duration = DEFAULT_DURATION) 
     const per = Math.max(MIN_DURATION, Number(duration) || DEFAULT_DURATION);
     const durations = slideFiles.map(() => per);
 
-    // 3) Concat list for ffmpeg
+    // 3) Concat list
     const listPath = path.join(tmpDir, 'list.ffconcat');
     writeConcatList(slideFiles, durations, listPath);
 
@@ -141,12 +166,11 @@ async function createSlideshow(images, outputPath, duration = DEFAULT_DURATION) 
         .save(outputPath);
     });
   } finally {
-    // Cleanup temp dir
     try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
   }
 }
 
-// -------------------- Pipedream proxy helpers --------------------
+// -------------------- Proxy helpers --------------------
 async function fetchWithTimeout(url, options = {}, timeoutMs = FETCH_TIMEOUT_MS) {
   const controller = new AbortController();
   const t = setTimeout(() => controller.abort(), timeoutMs);
@@ -164,7 +188,7 @@ async function parsePipedreamResponse(res) {
     try {
       const json = await res.json();
       return { kind: 'json', status: res.status, body: json };
-    } catch { /* ignore */ }
+    } catch {}
   }
 
   const text = await res.text();
@@ -176,7 +200,8 @@ async function parsePipedreamResponse(res) {
   }
 }
 
-// -------------------- Proxy route (frontend → Pipedream) --------------------
+// -------------------- Routes --------------------
+// Frontend → Pipedream → (back) → here
 app.post('/generate-proxy', async (req, res) => {
   try {
     const { itemId, images, duration } = req.body || {};
@@ -260,7 +285,7 @@ app.post('/generate-proxy', async (req, res) => {
   }
 });
 
-// -------------------- Direct image array → video --------------------
+// Direct image array → video
 app.post('/generate', async (req, res) => {
   const { imageUrls, duration } = req.body;
 
@@ -285,7 +310,7 @@ app.post('/generate', async (req, res) => {
   }
 });
 
-// -------------------- Launch server --------------------
+// -------------------- Launch --------------------
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 SlideMint backend running on port ${PORT}`);
