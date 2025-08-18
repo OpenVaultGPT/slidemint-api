@@ -1,7 +1,9 @@
+// index.mjs
 import express from 'express';
 import { createCanvas, loadImage } from 'canvas';
 import fetch from 'node-fetch';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import ffmpeg from 'fluent-ffmpeg';
 import sharp from 'sharp';
@@ -12,30 +14,47 @@ import cors from 'cors';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// -------------------- Config --------------------
 const app = express();
 app.use(cors());
 app.use(express.static(path.join(__dirname, 'public')));
 app.use(express.json({ limit: '1mb' }));
 
-// ---- config ----
-const PIPEDREAM_URL = process.env.PIPEDREAM_URL || 'https://eos21xm8bj17yt2.m.pipedream.net';
-const FETCH_TIMEOUT_MS = Number(process.env.PD_TIMEOUT_MS || 60000);
+// Where your public videos can be fetched from (for response links)
+const PUBLIC_BASE_URL =
+  process.env.PUBLIC_BASE_URL || 'https://slidemint-api.onrender.com';
 
-// ✅ Healthcheck
+// Pipedream proxy
+const PIPEDREAM_URL =
+  process.env.PIPEDREAM_URL || 'https://eos21xm8bj17yt2.m.pipedream.net';
+
+// Proxy timeout (default lifted to 3 min to avoid premature aborts)
+const FETCH_TIMEOUT_MS = Number(process.env.PD_TIMEOUT_MS || 180000);
+
+// Slideshow/render constants tuned for speed + quality
+const OUTPUT_WIDTH = 720;
+const OUTPUT_HEIGHT = 1280;
+const FPS = 24; // smooth, fewer frames than 30
+const DEFAULT_DURATION = 2; // seconds per slide (before capping)
+const MAX_FRAMES_PER_SLIDE = 45; // hard cap (~2s @ 24fps)
+const REPEAT_COUNT = 2; // loop whole sequence twice
+const SRC_MAX_WIDTH = 1280; // resize sources to reduce IO (still sharp for 720p)
+
+// -------------------- Healthcheck --------------------
 app.get('/health', (_, res) =>
   res.status(200).json({ ok: true, service: 'slidemint-api', ts: new Date().toISOString() })
 );
 
-// 📥 Safe image fetch + resize (bigger headroom for Ken Burns)
+// -------------------- Image fetch + resize --------------------
 async function fetchImageAsCanvasImage(url) {
   try {
     const response = await fetch(url, { timeout: 8000 });
     if (!response.ok) throw new Error(`Image fetch failed: ${url}`);
     const buffer = await response.buffer();
 
-    // Headroom for zoom/pan; do not upscale beyond source
+    // Resize down to reduce IO; do not upscale beyond source
     const resized = await sharp(buffer)
-      .resize({ width: 1440, withoutEnlargement: true })
+      .resize({ width: SRC_MAX_WIDTH, withoutEnlargement: true })
       .png()
       .toBuffer();
 
@@ -46,45 +65,44 @@ async function fetchImageAsCanvasImage(url) {
   }
 }
 
-// 🎞️ Build slideshow (Ken Burns + autoplay 2x)
-async function createSlideshow(images, outputPath, duration = 2) {
-  const width = 720;   // portrait output to suit eBay phone view
-  const height = 1280;
-  const fps = 30;
-  const framesPerSlide = Math.max(1, Math.round((duration || 2) * fps));
-  const repeatCount = 2; // play whole sequence twice
+// -------------------- Slideshow (Ken Burns + loop x2) --------------------
+async function createSlideshow(images, outputPath, duration = DEFAULT_DURATION) {
+  const framesPerSlide = Math.min(
+    MAX_FRAMES_PER_SLIDE,
+    Math.max(1, Math.round((duration || DEFAULT_DURATION) * FPS))
+  );
 
-  const tempFramesDir = path.join(__dirname, 'frames', uuidv4());
+  // Use OS temp dir for faster disk and auto-clean by platform
+  const tempFramesDir = path.join(os.tmpdir(), 'slidemint-frames', uuidv4());
   fs.mkdirSync(tempFramesDir, { recursive: true });
 
   // Preload images
   const loaded = await Promise.all(images.map(u => fetchImageAsCanvasImage(u)));
 
-  // simple smooth easing
+  // Easing for gentle motion
   const easeInOut = (t) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
 
-  // Draw one frame with gentle pan/zoom
   function drawKenBurnsFrame(ctx, img, slideIdx, frameIdx, totalFrames) {
     // background
     ctx.fillStyle = '#000';
-    ctx.fillRect(0, 0, width, height);
+    ctx.fillRect(0, 0, OUTPUT_WIDTH, OUTPUT_HEIGHT);
 
     if (!img) {
       ctx.fillStyle = '#111';
-      ctx.fillRect(0, 0, width, height);
+      ctx.fillRect(0, 0, OUTPUT_WIDTH, OUTPUT_HEIGHT);
       ctx.fillStyle = '#fff';
       ctx.font = 'bold 36px sans-serif';
       ctx.textAlign = 'center';
-      ctx.fillText('⚠️ Image failed to load', width / 2, height / 2);
+      ctx.fillText('⚠️ Image failed to load', OUTPUT_WIDTH / 2, OUTPUT_HEIGHT / 2);
       return;
     }
 
-    const t = easeInOut(totalFrames > 1 ? frameIdx / (totalFrames - 1) : 0);
+    const t = totalFrames > 1 ? easeInOut(frameIdx / (totalFrames - 1)) : 0;
 
-    // cover-scale to fill canvas; then add gentle zoom
-    const cover = Math.max(width / img.width, height / img.height);
-    const startZ = 1.05; // subtle
-    const endZ = 1.12;
+    // Cover-scale to fill canvas; subtle zoom to keep encode friendly
+    const cover = Math.max(OUTPUT_WIDTH / img.width, OUTPUT_HEIGHT / img.height);
+    const startZ = 1.03;
+    const endZ = 1.08;
     const zoom = cover * (slideIdx % 2 === 0
       ? startZ + (endZ - startZ) * t
       : endZ + (startZ - endZ) * t);
@@ -96,24 +114,23 @@ async function createSlideshow(images, outputPath, duration = 2) {
     let x, y;
     switch (slideIdx % 4) {
       case 0: // left → right
-        x = (width - dw) * t;
-        y = (height - dh) / 2;
+        x = (OUTPUT_WIDTH - dw) * t;
+        y = (OUTPUT_HEIGHT - dh) / 2;
         break;
       case 1: // top → bottom
-        x = (width - dw) / 2;
-        y = (height - dh) * t;
+        x = (OUTPUT_WIDTH - dw) / 2;
+        y = (OUTPUT_HEIGHT - dh) * t;
         break;
       case 2: // right → left
-        x = (width - dw) * (1 - t);
-        y = (height - dh) / 2;
+        x = (OUTPUT_WIDTH - dw) * (1 - t);
+        y = (OUTPUT_HEIGHT - dh) / 2;
         break;
       default: // bottom → top
-        x = (width - dw) / 2;
-        y = (height - dh) * (1 - t);
+        x = (OUTPUT_WIDTH - dw) / 2;
+        y = (OUTPUT_HEIGHT - dh) * (1 - t);
         break;
     }
 
-    // draw
     ctx.drawImage(
       img,
       Math.round(x),
@@ -126,11 +143,11 @@ async function createSlideshow(images, outputPath, duration = 2) {
   // Render frames (loop sequence twice)
   let globalFrame = 0;
   try {
-    for (let loop = 0; loop < repeatCount; loop++) {
+    for (let loop = 0; loop < REPEAT_COUNT; loop++) {
       for (let i = 0; i < loaded.length; i++) {
         const img = loaded[i];
         for (let f = 0; f < framesPerSlide; f++) {
-          const canvas = createCanvas(width, height);
+          const canvas = createCanvas(OUTPUT_WIDTH, OUTPUT_HEIGHT);
           const ctx = canvas.getContext('2d');
           drawKenBurnsFrame(ctx, img, i, f, framesPerSlide);
 
@@ -144,29 +161,23 @@ async function createSlideshow(images, outputPath, duration = 2) {
       }
     }
 
-    // Stitch frames → MP4 (safe, eBay-friendly, no exotic filters)
+    // Stitch frames → MP4 (eBay-friendly)
     await new Promise((resolve, reject) => {
       ffmpeg()
         .input(path.join(tempFramesDir, 'frame-%05d.png'))
-        .inputOptions(['-framerate', String(fps)])
+        .inputOptions(['-framerate', String(FPS)])
         .outputOptions([
-          // keep it simple: frames are already 720x1280
-          '-r', String(fps),
-
-          // standard H.264; preset bumped for quality vs ultrafast
+          '-r', String(FPS),
           '-c:v', 'libx264',
           '-pix_fmt', 'yuv420p',
           '-preset', 'medium',
-          '-b:v', '5M',
-
-          // (optional but safe) small extra hints — uncomment if you want after first test:
-          // '-profile:v', 'high',
-          // '-level', '4.0',
-          // '-g', '60',
-          // '-bf', '3',
-
+          // Use CRF with a safety ceiling for marketplaces
+          '-crf', '21',
+          '-maxrate', '5M',
+          '-bufsize', '10M',
           '-movflags', '+faststart'
         ])
+        .size(`${OUTPUT_WIDTH}x${OUTPUT_HEIGHT}`)
         .save(outputPath)
         .on('start', cmd => console.log('🎬 FFmpeg started:', cmd))
         .on('stderr', line => console.log('📦 FFmpeg:', line))
@@ -180,12 +191,12 @@ async function createSlideshow(images, outputPath, duration = 2) {
         });
     });
   } finally {
-    // clean up temp frames
+    // Best-effort cleanup
     try { fs.rmSync(tempFramesDir, { recursive: true, force: true }); } catch {}
   }
 }
 
-// ---- helpers for Pipedream proxy ----
+// -------------------- Helpers for Pipedream proxy --------------------
 async function fetchWithTimeout(url, options = {}, timeoutMs = FETCH_TIMEOUT_MS) {
   const controller = new AbortController();
   const t = setTimeout(() => controller.abort(), timeoutMs);
@@ -215,7 +226,7 @@ async function parsePipedreamResponse(res) {
   }
 }
 
-// 🔁 Proxy route (frontend ➜ backend ➜ Pipedream)
+// -------------------- Proxy route (frontend → Pipedream) --------------------
 app.post('/generate-proxy', async (req, res) => {
   try {
     const { itemId, images, duration } = req.body || {};
@@ -299,7 +310,7 @@ app.post('/generate-proxy', async (req, res) => {
   }
 });
 
-// ✅ Direct call with image array (kept intact)
+// -------------------- Direct image array → video --------------------
 app.post('/generate', async (req, res) => {
   const { imageUrls, duration } = req.body;
 
@@ -314,9 +325,9 @@ app.post('/generate', async (req, res) => {
     const videoFilename = `video-${uuidv4()}.mp4`;
     const outputPath = path.join(outputDir, videoFilename);
 
-    await createSlideshow(imageUrls, outputPath, duration || 2);
+    await createSlideshow(imageUrls, outputPath, duration || DEFAULT_DURATION);
 
-    const videoUrl = `https://slidemint-api.onrender.com/videos/${videoFilename}`;
+    const videoUrl = `${PUBLIC_BASE_URL.replace(/\/$/, '')}/videos/${videoFilename}`;
     return res.status(200).json({ videoUrl });
   } catch (err) {
     console.error('❌ Error generating video:', err.stack || err.message);
@@ -324,7 +335,7 @@ app.post('/generate', async (req, res) => {
   }
 });
 
-// 🚀 Launch server
+// -------------------- Launch server --------------------
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 SlideMint backend running on port ${PORT}`);
