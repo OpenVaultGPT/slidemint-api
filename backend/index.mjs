@@ -83,29 +83,19 @@ async function createSlideshow(images, outputPath, duration = 2) {
       .input(path.join(tempFramesDir, 'frame-%03d.png'))
       .inputOptions(['-framerate', (1 / duration).toFixed(2)])
      .outputOptions([
-  // Pre-scale + set pixel format (safe, widely supported)
-  '-vf', 'fps=30,scale=720:1280:flags=lanczos,format=yuv420p',
-
-  // Stable output frame rate
+  // keep a clean 30 fps and pre-scale to your portrait output
   '-r', '30',
+  '-vf', 'scale=720:1280',
 
-  // H.264 settings that survive platform re-encodes
-  '-preset', 'medium',        // use 'slow' later if CPU allows
-  '-profile:v', 'high',
-  '-level', '4.0',
+  // standard H.264 output that every platform accepts
+  '-c:v', 'libx264',
   '-pix_fmt', 'yuv420p',
-  '-g', '60',                 // 2s GOP
-  '-bf', '3',
+  '-preset', 'medium',       // you can try 'slow' later if Render has headroom
 
-  // Bitrate headroom (good for second encode on eBay)
+  // give eBay's re-encode some bitrate headroom
   '-b:v', '5M',
-  '-maxrate', '6M',
-  '-bufsize', '10M',
 
-  // Optimized for slides/stills
-  '-tune', 'stillimage',
-
-  // Fast start for web players
+  // faststart for web players/ingest
   '-movflags', '+faststart'
 ])
       .videoCodec('libx264')
