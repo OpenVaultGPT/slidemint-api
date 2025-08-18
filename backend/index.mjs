@@ -232,11 +232,33 @@ app.post('/jobs', (req, res) => {
   return res.status(202).json({ ok:true, jobId });
 });
 
-// Poll status
+// Poll status (resilient to restarts / instance hops)
 app.get('/jobs/:id', (req, res) => {
-  const j = jobs.get(req.params.id);
-  if (!j) return res.status(404).json({ ok:false, message:'Unknown jobId' });
-  return res.status(200).json({ ok:true, ...j });
+  const id = req.params.id;
+  const j = jobs.get(id);
+
+  if (j) {
+    return res.status(200).json({ ok: true, ...j });
+  }
+
+  // Fallback: if the process restarted or a different instance handled the POST,
+  // check if the output file exists and return "done".
+  const outputDir = path.join(__dirname, 'public', 'videos');
+  const videoFilename = `video-${id}.mp4`;
+  const videoPath = path.join(outputDir, videoFilename);
+
+  try {
+    if (fs.existsSync(videoPath)) {
+      return res.status(200).json({
+        ok: true,
+        status: 'done',
+        url: `${PUBLIC_BASE_URL}/videos/${videoFilename}`
+      });
+    }
+  } catch {}
+
+  // Not in memory and no file yet — treat as still queued (don’t 404).
+  return res.status(200).json({ ok: true, status: 'queued' });
 });
 
 // ---- Launch ----
