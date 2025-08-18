@@ -82,21 +82,12 @@ async function createSlideshow(images, outputPath, duration = 2) {
     ffmpeg()
       .input(path.join(tempFramesDir, 'frame-%03d.png'))
       .inputOptions(['-framerate', (1 / duration).toFixed(2)])
-     .outputOptions([
-  // keep a clean 30 fps and pre-scale to your portrait output
+    .outputOptions([
+  '-vf', 'scale=720:-2',
   '-r', '30',
-  '-vf', 'scale=720:1280',
-
-  // standard H.264 output that every platform accepts
-  '-c:v', 'libx264',
+  '-preset', 'ultrafast',
   '-pix_fmt', 'yuv420p',
-  '-preset', 'medium',       // you can try 'slow' later if Render has headroom
-
-  // give eBay's re-encode some bitrate headroom
-  '-b:v', '5M',
-
-  // faststart for web players/ingest
-  '-movflags', '+faststart'
+  '-movflags', '+faststart',
 ])
       .videoCodec('libx264')
       .save(outputPath)
