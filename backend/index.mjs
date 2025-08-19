@@ -40,39 +40,23 @@ app.get('/health', (_, res) =>
 // Helpers
 // ============================================================================
 
-// --- Network helpers (UA + short timeouts + placeholder guard) ---
+// --- HOTFIX: robust image fetcher (replaces previous network helpers + prepareSlidePng) ---
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36';
 
-async function headInfo(url, timeoutMs = 1500) {
-  const controller = new AbortController();
-  const t = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const r = await fetch(url, {
-      method: 'HEAD',
-      headers: { 'User-Agent': UA, 'Accept': 'image/*' },
-      signal: controller.signal
-    });
-    const len = Number(r.headers.get('content-length') || 0);
-    return { ok: r.ok, len };
-  } catch {
-    return { ok: false, len: 0 };
-  } finally { clearTimeout(t); }
-}
-
-async function fetchBufferWithTimeout(url, timeoutMs = 4000) {
+async function fetchBufferWithTimeout(url, timeoutMs = 4500) {
   const controller = new AbortController();
   const t = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const r = await fetch(url, {
       headers: { 'User-Agent': UA, 'Accept': 'image/*' },
-      signal: controller.signal
+      signal: controller.signal,
     });
     if (!r.ok) throw new Error(`Fetch failed ${r.status} for ${url}`);
     return await r.buffer();
   } finally { clearTimeout(t); }
 }
 
-// Force eBay path to a size variant & strip query
+// Force eBay path to a given size and strip query
 function forceVariant(u, size = 1600) {
   try {
     const url = new URL(u);
@@ -86,25 +70,40 @@ function forceVariant(u, size = 1600) {
   } catch { return u; }
 }
 
-// Prefer 1200 first for legacy /00/s/; require minimum bytes to dodge placeholders
-async function resolveWorkingEbayUrl(u) {
-  const MIN_BYTES = 35000;
-  const isLegacy = /\/\d{2}\/s\//i.test(u);
-  const sizes = isLegacy ? [1200, 1000, 800, 640, 500] : [1600, 1200, 1000, 800, 500];
-  for (const s of sizes) {
-    const cand = forceVariant(u, s);
-    const { ok, len } = await headInfo(cand);
-    if (ok && len >= MIN_BYTES) return cand;
+function buildCandidates(u) {
+  try {
+    const isLegacy = /\/\d{2}\/s\//i.test(new URL(u).pathname); // /00/s/...
+    const sizes = isLegacy ? [1200, 1000, 800, 640, 500] : [1600, 1200, 1000, 800, 500];
+    const out = sizes.map(s => forceVariant(u, s));
+    out.push(new URL(u).toString()); // last resort: original URL
+    return out;
+  } catch {
+    return [u];
+  }
+}
+
+// Download and validate the first real image (not a placeholder)
+async function resolveImageBuffer(u) {
+  const MIN_BYTES = 15000; // small files are usually placeholders
+  const candidates = buildCandidates(u);
+
+  for (const cand of candidates) {
+    try {
+      const buf = await fetchBufferWithTimeout(cand, 4500);
+      if (buf.length < MIN_BYTES) continue;
+      // Ensure it’s a decodable image
+      await sharp(buf).metadata();
+      return { buf, url: cand };
+    } catch { /* try next */ }
   }
   return null;
 }
 
-// Prepare one PNG slide: blurred background (cover) + sharp foreground (contain, no upscaling)
+// Prepare one PNG slide: blurred bg + sharp fg (no upscaling)
 async function prepareSlidePng(url, outPath) {
-  const working = await resolveWorkingEbayUrl(url);
-  if (!working) throw new Error('No reachable variant');
-
-  const srcBuf = await fetchBufferWithTimeout(working, 4000);
+  const resolved = await resolveImageBuffer(url);
+  if (!resolved) throw new Error('No reachable/valid image');
+  const srcBuf = resolved.buf;
 
   const bg = await sharp(srcBuf)
     .resize(OUTPUT_WIDTH, OUTPUT_HEIGHT, { fit: 'cover', position: 'center' })
@@ -120,7 +119,7 @@ async function prepareSlidePng(url, outPath) {
   const left = Math.round((OUTPUT_WIDTH  - (fgMeta.width  || 0)) / 2);
   const top  = Math.round((OUTPUT_HEIGHT - (fgMeta.height || 0)) / 2);
 
-  const final = await sharp(bg).composite([{ input: fgBuf, top, left }]).png().toBuffer();
+  const final = await sharp(bg).composite([{ input: fgBuf, left, top }]).png().toBuffer();
   fs.writeFileSync(outPath, final);
 }
 
