@@ -22,6 +22,7 @@ app.use(express.json({ limit: '1mb' }));
 const PUBLIC_BASE_URL  = (process.env.PUBLIC_BASE_URL || 'https://slidemint-api.onrender.com').replace(/\/$/, '');
 const PIPEDREAM_URL    = process.env.PIPEDREAM_URL || 'https://eos21xm8bj17yt2.m.pipedream.net';
 const FETCH_TIMEOUT_MS = Number(process.env.PD_TIMEOUT_MS || 180000);
+const JOB_LIMIT_MS     = Number(process.env.JOB_LIMIT_MS || 4 * 60 * 1000); // 4 min
 
 // Slideshow constants (no Ken Burns)
 const OUTPUT_WIDTH = 720;
@@ -31,24 +32,27 @@ const DEFAULT_DURATION = 2; // sec per slide
 const MIN_DURATION = 0.5;
 
 // ---- Healthcheck ----
-app.get('/health', (_, res) => res.status(200).json({ ok: true, service: 'slidemint-api', ts: new Date().toISOString() }));
+app.get('/health', (_, res) =>
+  res.status(200).json({ ok: true, service: 'slidemint-api', ts: new Date().toISOString() })
+);
 
 // ============================================================================
 // Helpers
 // ============================================================================
 
-// Hi-res upgrader (kept for generic use)
-function toHiResEbay(url) {
+// Quick HEAD check (short timeout) to avoid long stalls on dead variants
+async function headOk(url, timeoutMs = 1500) {
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const u = new URL(url);
-    u.pathname = u.pathname
-      .replace(/\/s-l\d+\./i, '/s-l1600.')
-      .replace(/(w|h)\d+\./gi, 'w1600.');
-    return u.toString();
-  } catch { return url; }
+    const r = await fetch(url, { method: 'HEAD', signal: controller.signal });
+    return r.ok;
+  } catch { return false; }
+  finally { clearTimeout(t); }
 }
 
-async function fetchBufferWithTimeout(url, timeoutMs = 12000) {
+// GET buffer with short timeout
+async function fetchBufferWithTimeout(url, timeoutMs = 4000) {
   const controller = new AbortController();
   const t = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -58,14 +62,40 @@ async function fetchBufferWithTimeout(url, timeoutMs = 12000) {
   } finally { clearTimeout(t); }
 }
 
+// Force eBay path to a size variant & strip query
+function forceVariant(u, size = 1600) {
+  try {
+    const url = new URL(u);
+    url.search = '';
+    url.pathname = url.pathname
+      .replace(/\/s-l\d+\.(jpg|jpeg|png|webp)$/i, `/s-l${size}.jpg`)
+      .replace(/\/w\d+\.(jpg|jpeg|png|webp)$/i,  `/s-l${size}.jpg`)
+      .replace(/\/h\d+\.(jpg|jpeg|png|webp)$/i,  `/s-l${size}.jpg`)
+      .replace(/\/\$_\d+\.(jpg|jpeg|png|webp)$/i, `/s-l${size}.jpg`);
+    return url.toString();
+  } catch { return u; }
+}
+
+// Pick the first reachable variant quickly
+async function resolveWorkingEbayUrl(u) {
+  const sizes = [1600, 1200, 1000, 800, 500];
+  for (const s of sizes) {
+    const cand = forceVariant(u, s);
+    if (await headOk(cand)) return cand;
+  }
+  return null;
+}
+
 // Prepare one PNG slide: blurred background (cover) + sharp foreground (contain, no upscaling)
 async function prepareSlidePng(url, outPath) {
-  const hi = toHiResEbay(url);
-  const srcBuf = await fetchBufferWithTimeout(hi);
+  const working = await resolveWorkingEbayUrl(url);
+  if (!working) throw new Error('No reachable variant');
+
+  const srcBuf = await fetchBufferWithTimeout(working, 4000);
 
   const bg = await sharp(srcBuf)
-    .resize(OUTPUT_WIDTH, OUTPUT_HEIGHT, { fit: 'cover', position: 'centre' })
-    .blur(20)
+    .resize(OUTPUT_WIDTH, OUTPUT_HEIGHT, { fit: 'cover', position: 'center' })
+    .blur(12)
     .modulate({ brightness: 0.86, saturation: 1 })
     .toBuffer();
 
@@ -84,7 +114,6 @@ async function prepareSlidePng(url, outPath) {
 function writeConcatList(slideFiles, durations, listPath) {
   const lines = ['ffconcat version 1.0'];
   slideFiles.forEach((f, i) => { lines.push(`file '${f}'`); lines.push(`duration ${durations[i].toFixed(6)}`); });
-  // Last file repeated per ffconcat spec
   lines.push(`file '${slideFiles[slideFiles.length - 1]}'`);
   fs.writeFileSync(listPath, lines.join('\n'));
 }
@@ -119,7 +148,7 @@ async function createSlideshow(images, outputPath, duration = DEFAULT_DURATION) 
           '-r', String(FPS),
           '-c:v', 'libx264',
           '-pix_fmt', 'yuv420p',
-          '-preset', 'medium',
+          '-preset', 'fast',     // faster encode
           '-crf', '21',
           '-maxrate', '5M',
           '-bufsize', '10M',
@@ -137,32 +166,20 @@ async function createSlideshow(images, outputPath, duration = DEFAULT_DURATION) 
   }
 }
 
-// ----------------------------------------------
 // Accept /images/... and legacy /00/s/... patterns, force s-l1600.jpg, strip queries
 function normalizeEbayUrl(u) {
   try {
     const url = new URL(u);
-
-    // eBay CDN only
     if (!/(^|\.)ebayimg\.com$/i.test(url.hostname)) return null;
-
-    // Must look like gallery: either /images/... or legacy /00/s/...
     if (!(/\/images\//i.test(url.pathname) || /\/\d{2}\/s\//i.test(url.pathname))) return null;
-
-    // Remove query cruft like ?set_id=...
-    url.search = "";
-
-    // Upgrade variants to s-l1600.jpg (normalize extension)
+    url.search = '';
     url.pathname = url.pathname
-      .replace(/\/s-l\d+\.(jpg|jpeg|png|webp)$/i, "/s-l1600.jpg")
-      .replace(/\/w\d+\.(jpg|jpeg|png|webp)$/i,  "/s-l1600.jpg")
-      .replace(/\/h\d+\.(jpg|jpeg|png|webp)$/i,  "/s-l1600.jpg")
-      .replace(/\/\$_\d+\.(jpg|jpeg|png|webp)$/i, "/s-l1600.jpg"); // $_57.JPG style
-
+      .replace(/\/s-l\d+\.(jpg|jpeg|png|webp)$/i, '/s-l1600.jpg')
+      .replace(/\/w\d+\.(jpg|jpeg|png|webp)$/i,  '/s-l1600.jpg')
+      .replace(/\/h\d+\.(jpg|jpeg|png|webp)$/i,  '/s-l1600.jpg')
+      .replace(/\/\$_\d+\.(jpg|jpeg|png|webp)$/i, '/s-l1600.jpg');
     return url.toString();
-  } catch {
-    return null;
-  }
+  } catch { return null; }
 }
 
 function cleanEbayImages(arr) {
@@ -182,7 +199,7 @@ function cleanEbayImages(arr) {
 }
 
 // ============================================================================
-// Optional Pipedream proxy (unchanged flow-wise)
+// Optional Pipedream proxy
 // ============================================================================
 async function fetchWithTimeout(url, options = {}, timeoutMs = FETCH_TIMEOUT_MS) {
   const controller = new AbortController();
@@ -233,10 +250,11 @@ app.post('/generate-proxy', async (req, res) => {
   }
 });
 
-// ---- Direct synchronous render (still available) ----
+// ---- Direct synchronous render (still available)
 app.post('/generate', async (req, res) => {
   const { imageUrls, duration } = req.body;
-  if (!Array.isArray(imageUrls) || imageUrls.length === 0) return res.status(400).json({ error:'Missing or invalid image URLs' });
+  if (!Array.isArray(imageUrls) || imageUrls.length === 0)
+    return res.status(400).json({ error:'Missing or invalid image URLs' });
 
   try {
     const outputDir = path.join(__dirname, 'public', 'videos');
@@ -260,12 +278,18 @@ const jobs = new Map(); // jobId -> { status:'queued'|'running'|'done'|'error', 
 async function runJob(jobId, images, duration) {
   try {
     jobs.set(jobId, { status: 'running' });
+
     const outputDir = path.join(__dirname, 'public', 'videos');
     fs.mkdirSync(outputDir, { recursive: true });
     const videoFilename = `video-${jobId}.mp4`;
     const outputPath = path.join(outputDir, videoFilename);
 
-    await createSlideshow(images, outputPath, duration || DEFAULT_DURATION);
+    // Hard time limit so pollers don't hang forever
+    await Promise.race([
+      createSlideshow(images, outputPath, duration || DEFAULT_DURATION),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('TIME_LIMIT')), JOB_LIMIT_MS))
+    ]);
+
     jobs.set(jobId, { status: 'done', url: `${PUBLIC_BASE_URL}/videos/${videoFilename}` });
   } catch (e) {
     jobs.set(jobId, { status: 'error', error: String(e?.message || e) });
@@ -281,14 +305,13 @@ app.post('/jobs', (req, res) => {
     return res.status(400).json({
       ok: false,
       message: 'imageUrls[] required (eBay gallery images only)',
-      detail: { hint: 'Provide https://i.ebayimg.com/.../s-l*.jpg under /images/ paths.' }
+      detail: { hint: 'Provide https://i.ebayimg.com/.../s-l*.jpg under /images/ or /00/s/ paths.' }
     });
   }
 
   const jobId = uuidv4();
   jobs.set(jobId, { status: 'queued' });
-  // fire-and-forget
-  runJob(jobId, cleaned, duration);
+  runJob(jobId, cleaned, duration); // fire-and-forget
   return res.status(202).json({ ok: true, jobId, count: cleaned.length });
 });
 
@@ -297,9 +320,7 @@ app.get('/jobs/:id', (req, res) => {
   const id = req.params.id;
   const j = jobs.get(id);
 
-  if (j) {
-    return res.status(200).json({ ok: true, ...j });
-  }
+  if (j) return res.status(200).json({ ok: true, ...j });
 
   // Fallback: if RAM state is gone, check if file exists
   const outputDir = path.join(__dirname, 'public', 'videos');
