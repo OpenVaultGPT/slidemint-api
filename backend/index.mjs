@@ -40,23 +40,33 @@ app.get('/health', (_, res) =>
 // Helpers
 // ============================================================================
 
-// Quick HEAD check (short timeout) to avoid long stalls on dead variants
-async function headOk(url, timeoutMs = 1500) {
+// --- Network helpers (UA + short timeouts + placeholder guard) ---
+const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36';
+
+async function headInfo(url, timeoutMs = 1500) {
   const controller = new AbortController();
   const t = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const r = await fetch(url, { method: 'HEAD', signal: controller.signal });
-    return r.ok;
-  } catch { return false; }
-  finally { clearTimeout(t); }
+    const r = await fetch(url, {
+      method: 'HEAD',
+      headers: { 'User-Agent': UA, 'Accept': 'image/*' },
+      signal: controller.signal
+    });
+    const len = Number(r.headers.get('content-length') || 0);
+    return { ok: r.ok, len };
+  } catch {
+    return { ok: false, len: 0 };
+  } finally { clearTimeout(t); }
 }
 
-// GET buffer with short timeout
 async function fetchBufferWithTimeout(url, timeoutMs = 4000) {
   const controller = new AbortController();
   const t = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const r = await fetch(url, { signal: controller.signal });
+    const r = await fetch(url, {
+      headers: { 'User-Agent': UA, 'Accept': 'image/*' },
+      signal: controller.signal
+    });
     if (!r.ok) throw new Error(`Fetch failed ${r.status} for ${url}`);
     return await r.buffer();
   } finally { clearTimeout(t); }
@@ -76,12 +86,15 @@ function forceVariant(u, size = 1600) {
   } catch { return u; }
 }
 
-// Pick the first reachable variant quickly
+// Prefer 1200 first for legacy /00/s/; require minimum bytes to dodge placeholders
 async function resolveWorkingEbayUrl(u) {
-  const sizes = [1600, 1200, 1000, 800, 500];
+  const MIN_BYTES = 35000;
+  const isLegacy = /\/\d{2}\/s\//i.test(u);
+  const sizes = isLegacy ? [1200, 1000, 800, 640, 500] : [1600, 1200, 1000, 800, 500];
   for (const s of sizes) {
     const cand = forceVariant(u, s);
-    if (await headOk(cand)) return cand;
+    const { ok, len } = await headInfo(cand);
+    if (ok && len >= MIN_BYTES) return cand;
   }
   return null;
 }
@@ -114,6 +127,7 @@ async function prepareSlidePng(url, outPath) {
 function writeConcatList(slideFiles, durations, listPath) {
   const lines = ['ffconcat version 1.0'];
   slideFiles.forEach((f, i) => { lines.push(`file '${f}'`); lines.push(`duration ${durations[i].toFixed(6)}`); });
+  // Repeat last file per ffconcat spec
   lines.push(`file '${slideFiles[slideFiles.length - 1]}'`);
   fs.writeFileSync(listPath, lines.join('\n'));
 }
@@ -148,7 +162,7 @@ async function createSlideshow(images, outputPath, duration = DEFAULT_DURATION) 
           '-r', String(FPS),
           '-c:v', 'libx264',
           '-pix_fmt', 'yuv420p',
-          '-preset', 'fast',     // faster encode
+          '-preset', 'fast',     // faster encode (eBay-safe)
           '-crf', '21',
           '-maxrate', '5M',
           '-bufsize', '10M',
@@ -166,7 +180,7 @@ async function createSlideshow(images, outputPath, duration = DEFAULT_DURATION) 
   }
 }
 
-// Accept /images/... and legacy /00/s/... patterns, force s-l1600.jpg, strip queries
+// Accept /images/... and legacy /00/s/... patterns, force s-l1600.jpg, strip queries; used for input cleaning
 function normalizeEbayUrl(u) {
   try {
     const url = new URL(u);
@@ -305,7 +319,7 @@ app.post('/jobs', (req, res) => {
     return res.status(400).json({
       ok: false,
       message: 'imageUrls[] required (eBay gallery images only)',
-      detail: { hint: 'Provide https://i.ebayimg.com/.../s-l*.jpg under /images/ or /00/s/ paths.' }
+      detail: { hint: 'Provide https://i.ebayimg.com/... under /images/ or /00/s/ paths.' }
     });
   }
 
