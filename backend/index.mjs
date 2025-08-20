@@ -1,4 +1,3 @@
-
 import express from 'express';
 import { createCanvas, loadImage } from 'canvas';
 import fetch from 'node-fetch';
@@ -22,89 +21,108 @@ app.use(express.json({ limit: '1mb' }));
 const PIPEDREAM_URL = process.env.PIPEDREAM_URL || 'https://eos21xm8bj17yt2.m.pipedream.net';
 const FETCH_TIMEOUT_MS = Number(process.env.PD_TIMEOUT_MS || 60000);
 
-// ✅ Healthcheck
-app.get('/health', (_, res) => res.status(200).json({ ok: true, service: 'slidemint-api', ts: new Date().toISOString() }));
+// Target video frame (use 1280x720 if you prefer HD)
+const FRAME_W = 1920;
+const FRAME_H = 1080;
+const FPS = 30;
 
-// 📥 Safe image fetch + resize
+// ✅ Healthcheck
+app.get('/health', (_, res) =>
+  res.status(200).json({ ok: true, service: 'slidemint-api', ts: new Date().toISOString() })
+);
+
+// 📥 Safe image fetch + PRE-FIT to exact 16:9 frame via sharp (best quality)
 async function fetchImageAsCanvasImage(url) {
   try {
     const response = await fetch(url, { timeout: 8000 });
     if (!response.ok) throw new Error(`Image fetch failed: ${url}`);
     const buffer = await response.buffer();
-    // updated: pre-resize toward 1080p canvas, no upscaling of small images
-    const resized = await sharp(buffer).resize({ width: 1600, withoutEnlargement: true }).png().toBuffer();
-    return await loadImage(resized);
+
+    // Pre-fit to FRAME_W x FRAME_H using high-quality sharp scaler
+    const fitted = await sharp(buffer)
+      .resize({
+        width: FRAME_W,
+        height: FRAME_H,
+        fit: 'contain',
+        withoutEnlargement: false, // allow upscale here so *we* control scaling, not eBay
+        background: { r: 0, g: 0, b: 0, alpha: 1 },
+      })
+      .png()
+      .toBuffer();
+
+    return await loadImage(fitted);
   } catch (err) {
     console.error(`❌ Failed to process image: ${url}`, err.message);
     return null;
   }
 }
 
-// 🎞️ Build slideshow
+// 🎞️ Build slideshow (landscape, fixed FPS; each image shows for `duration` seconds)
 async function createSlideshow(images, outputPath, duration = 2) {
-  const width = 1920;   // updated
-  const height = 1080;  // updated
   const tempFramesDir = path.join(__dirname, 'frames', uuidv4());
   fs.mkdirSync(tempFramesDir, { recursive: true });
 
-  for (let i = 0; i < images.length; i++) {
-    console.log(`🖼️ Rendering image ${i + 1}/${images.length}`);
-    const img = await fetchImageAsCanvasImage(images[i]);
+  try {
+    for (let i = 0; i < images.length; i++) {
+      console.log(`🖼️ Rendering image ${i + 1}/${images.length}`);
+      const img = await fetchImageAsCanvasImage(images[i]);
 
-    const canvas = createCanvas(width, height);
-    const ctx = canvas.getContext('2d');
-    ctx.fillStyle = '#000';
-    ctx.fillRect(0, 0, width, height);
+      const canvas = createCanvas(FRAME_W, FRAME_H);
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = '#000';
+      ctx.fillRect(0, 0, FRAME_W, FRAME_H);
 
-    if (img) {
-      const aspect = img.width / img.height;
-      let drawWidth = width;
-      let drawHeight = width / aspect;
-      if (drawHeight > height) {
-        drawHeight = height;
-        drawWidth = height * aspect;
+      if (img) {
+        // Already sized by sharp to FRAME_W x FRAME_H with proper letterboxing
+        ctx.drawImage(img, 0, 0, FRAME_W, FRAME_H);
+      } else {
+        ctx.fillStyle = '#111';
+        ctx.fillRect(0, 0, FRAME_W, FRAME_H);
+        ctx.fillStyle = '#fff';
+        ctx.font = 'bold 48px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('⚠️ Image failed to load', FRAME_W / 2, FRAME_H / 2);
       }
-      const x = (width - drawWidth) / 2;
-      const y = (height - drawHeight) / 2;
-      ctx.drawImage(img, x, y, drawWidth, drawHeight);
-    } else {
-      ctx.fillStyle = '#111';
-      ctx.fillRect(0, 0, width, height);
-      ctx.fillStyle = '#fff';
-      ctx.font = 'bold 36px sans-serif';
-      ctx.textAlign = 'center';
-      ctx.fillText('⚠️ Image failed to load', width / 2, height / 2);
+
+      const framePath = path.join(tempFramesDir, `frame-${String(i).padStart(3, '0')}.png`);
+      fs.writeFileSync(framePath, canvas.toBuffer('image/png'));
     }
 
-    const framePath = path.join(tempFramesDir, `frame-${String(i).padStart(3, '0')}.png`);
-    fs.writeFileSync(framePath, canvas.toBuffer('image/png'));
-  }
+    // Input framerate = one frame per "duration" seconds
+    const inputFps = 1 / duration;
 
-  return new Promise((resolve, reject) => {
-    ffmpeg()
-      .input(path.join(tempFramesDir, 'frame-%03d.png'))
-      .inputOptions(['-framerate', (1 / duration).toFixed(2)])
-      .outputOptions([
-        '-vf', 'scale=1920:-2',            // updated
-        '-r', '30',
-        '-preset', 'ultrafast',
-        '-pix_fmt', 'yuv420p',
-        '-movflags', '+faststart',
-      ])
-      .videoCodec('libx264')
-      .save(outputPath)
-      .on('start', cmd => console.log('🎬 FFmpeg started:', cmd))
-      .on('stderr', line => console.log('📦 FFmpeg:', line))
-      .on('end', () => {
-        console.log('✅ FFmpeg finished');
-        fs.rmSync(tempFramesDir, { recursive: true, force: true });
-        resolve();
-      })
-      .on('error', err => {
-        console.error('❌ FFmpeg error:', err.message);
-        reject(err);
-      });
-  });
+    await new Promise((resolve, reject) => {
+      ffmpeg()
+        .input(path.join(tempFramesDir, 'frame-%03d.png'))
+        .inputOptions([`-framerate ${inputFps.toFixed(6)}`])
+        .videoCodec('libx264')
+        .outputOptions([
+          `-r ${FPS}`,             // constant 30 fps output
+          '-pix_fmt yuv420p',
+          '-profile:v high',
+          '-level 4.1',
+          '-g 60',                 // keyframe every 2s at 30fps
+          '-bf 2',
+          '-movflags +faststart',
+          '-crf 18',               // 18–20 is good; lower = higher quality
+          '-maxrate 8M',
+          '-bufsize 16M',
+          // keep colors in SDR 709 to avoid odd re-maps
+          '-colorspace bt709',
+          '-color_primaries bt709',
+          '-color_trc bt709',
+          // quality over speed; you can switch to "medium" if needed
+          '-preset slow',
+        ])
+        .on('start', cmd => console.log('🎬 FFmpeg started:', cmd))
+        .on('stderr', line => console.log('📦 FFmpeg:', line))
+        .on('end', resolve)
+        .on('error', reject)
+        .save(outputPath);
+    });
+  } finally {
+    fs.rmSync(tempFramesDir, { recursive: true, force: true });
+  }
 }
 
 // ---- helpers for Pipedream proxy ----
@@ -121,17 +139,13 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = FETCH_TIMEOUT_MS)
 async function parsePipedreamResponse(res) {
   const ct = (res.headers.get('content-type') || '').toLowerCase();
 
-  // Try JSON if content-type shows it
   if (ct.includes('application/json')) {
     try {
       const json = await res.json();
       return { kind: 'json', status: res.status, body: json };
-    } catch {
-      // fall through
-    }
+    } catch {}
   }
 
-  // Otherwise read text and try to JSON.parse it
   const text = await res.text();
   try {
     const json = JSON.parse(text);
@@ -162,7 +176,7 @@ app.post('/generate-proxy', async (req, res) => {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Accept': 'application/json',          // reduce HTML fallbacks
+          'Accept': 'application/json',
           'User-Agent': 'SlideMint-API/1.0',
         },
         body: JSON.stringify(cleanId ? { items: [cleanId], duration } : { images, duration }),
@@ -172,7 +186,6 @@ app.post('/generate-proxy', async (req, res) => {
 
     const parsed = await parsePipedreamResponse(pdRes);
 
-    // JSON + 2xx -> pass through
     if (parsed.kind === 'json' && pdRes.ok) {
       const videoUrl = parsed.body.videoUrl || parsed.body.placeholderVideoUrl || null;
       const cleanedUrls = Array.isArray(parsed.body.cleanedUrls) ? parsed.body.cleanedUrls : [];
@@ -195,7 +208,6 @@ app.post('/generate-proxy', async (req, res) => {
       });
     }
 
-    // JSON + non-2xx -> normalize as error JSON
     if (parsed.kind === 'json' && !pdRes.ok) {
       return res.status(502).json({
         ok: false,
@@ -206,7 +218,6 @@ app.post('/generate-proxy', async (req, res) => {
       });
     }
 
-    // TEXT/HTML -> wrap safely
     const preview = typeof parsed.body === 'string' ? parsed.body.slice(0, 500) : '';
     console.error('❌ Pipedream returned non-JSON:', preview);
     return res.status(502).json({
