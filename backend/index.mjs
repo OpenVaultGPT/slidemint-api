@@ -1,5 +1,4 @@
-// index.mjs — SlideMint backend (16:9 landscape, eBay-friendly 1080p)
-// Only changes from your working file: canvas size, image resize width, and FFmpeg scale → 1920x1080.
+// index.mjs — SlideMint backend (1080p HQ, eBay-friendly)
 
 import express from 'express';
 import { createCanvas, loadImage } from 'canvas';
@@ -27,14 +26,19 @@ const FETCH_TIMEOUT_MS = Number(process.env.PD_TIMEOUT_MS || 60000);
 // ✅ Healthcheck
 app.get('/health', (_, res) => res.status(200).json({ ok: true, service: 'slidemint-api', ts: new Date().toISOString() }));
 
-// 📥 Safe image fetch + resize
+// 📥 Safe image fetch + resize (avoid upscaling; keep detail; faster)
 async function fetchImageAsCanvasImage(url) {
   try {
     const response = await fetch(url, { timeout: 8000 });
     if (!response.ok) throw new Error(`Image fetch failed: ${url}`);
     const buffer = await response.buffer();
-    // CHANGED: target width 1920 for 1080p canvas
-    const resized = await sharp(buffer).resize({ width: 1920 }).png().toBuffer();
+
+    // HQ path: pre-resize toward canvas width but never enlarge tiny images
+    const resized = await sharp(buffer)
+      .resize({ width: 1600, withoutEnlargement: true })
+      .png()
+      .toBuffer();
+
     return await loadImage(resized);
   } catch (err) {
     console.error(`❌ Failed to process image: ${url}`, err.message);
@@ -42,9 +46,8 @@ async function fetchImageAsCanvasImage(url) {
   }
 }
 
-// 🎞️ Build slideshow
+// 🎞️ Build slideshow (1080p, CRF-based quality)
 async function createSlideshow(images, outputPath, duration = 2) {
-  // CHANGED: 16:9 landscape 1080p
   const width = 1920;
   const height = 1080;
   const tempFramesDir = path.join(__dirname, 'frames', uuidv4());
@@ -86,12 +89,15 @@ async function createSlideshow(images, outputPath, duration = 2) {
   return new Promise((resolve, reject) => {
     ffmpeg()
       .input(path.join(tempFramesDir, 'frame-%03d.png'))
-      .inputOptions(['-framerate', (1 / duration).toFixed(2)])
+      .inputOptions(['-framerate', (1 / duration).toFixed(2)]) // e.g. duration=2 -> 0.50 fps
       .outputOptions([
-        // CHANGED: scale to 1920x1080
-        '-vf', 'scale=1920:-2',
+        // 1080p, high quality scaling
+        '-vf', 'scale=1920:1080:flags=lanczos',
+        // HQ encode for stills
         '-r', '30',
-        '-preset', 'ultrafast',
+        '-preset', 'veryfast',     // quality vs speed (was ultrafast)
+        '-crf', '20',              // lower = higher quality (18–22 typical)
+        '-tune', 'stillimage',
         '-pix_fmt', 'yuv420p',
         '-movflags', '+faststart',
       ])
@@ -111,7 +117,7 @@ async function createSlideshow(images, outputPath, duration = 2) {
   });
 }
 
-// ---- helpers for Pipedream proxy ----
+// ---- helpers for Pipedream proxy (unchanged) ----
 async function fetchWithTimeout(url, options = {}, timeoutMs = FETCH_TIMEOUT_MS) {
   const controller = new AbortController();
   const t = setTimeout(() => controller.abort(), timeoutMs);
@@ -129,9 +135,7 @@ async function parsePipedreamResponse(res) {
     try {
       const json = await res.json();
       return { kind: 'json', status: res.status, body: json };
-    } catch {
-      // fall through
-    }
+    } catch {}
   }
 
   const text = await res.text();
@@ -143,7 +147,7 @@ async function parsePipedreamResponse(res) {
   }
 }
 
-// 🔁 Proxy route (frontend ➜ backend ➜ Pipedream)
+// 🔁 Proxy route (frontend ➜ backend ➜ Pipedream) — unchanged
 app.post('/generate-proxy', async (req, res) => {
   try {
     const { itemId, images, duration } = req.body || {};
@@ -227,7 +231,7 @@ app.post('/generate-proxy', async (req, res) => {
   }
 });
 
-// ✅ Direct call with image array (kept intact)
+// ✅ Direct call with image array (unchanged path)
 app.post('/generate', async (req, res) => {
   const { imageUrls, duration } = req.body;
 
