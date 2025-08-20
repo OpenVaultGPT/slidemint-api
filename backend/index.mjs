@@ -24,15 +24,15 @@ const PIPEDREAM_URL    = process.env.PIPEDREAM_URL || 'https://eos21xm8bj17yt2.m
 const FETCH_TIMEOUT_MS = Number(process.env.PD_TIMEOUT_MS || 180000);
 const JOB_LIMIT_MS     = Number(process.env.JOB_LIMIT_MS || 4 * 60 * 1000); // 4 min
 
-// Slideshow constants
-const OUTPUT_WIDTH = 720;
-const OUTPUT_HEIGHT = 1280;
-const FPS = 30;
-const DEFAULT_DURATION = 1.0;   // ← 1s per image by default
+// ---- Slideshow constants (LANDSCAPE 16:9 for eBay player) ----
+const OUTPUT_WIDTH  = 1920;     // fill eBay player (no bars)
+const OUTPUT_HEIGHT = 1080;
+const FPS = 30;                 // eBay-friendly
+const DEFAULT_DURATION = 1.0;   // ~1s per image
 const MIN_DURATION = 0.5;
 
 // Optional default loop count (can be overridden per request)
-const DEFAULT_LOOP_COUNT = Number(process.env.DEFAULT_LOOP_COUNT || 2); // repeat 2× by default
+const DEFAULT_LOOP_COUNT = Number(process.env.DEFAULT_LOOP_COUNT || 1); // default = 1 to keep encodes fast
 
 // ---- Healthcheck ----
 app.get('/health', (_, res) =>
@@ -42,17 +42,13 @@ app.get('/health', (_, res) =>
 // ============================================================================
 // Helpers
 // ============================================================================
-
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36';
 
 async function fetchBufferWithTimeout(url, timeoutMs = 4500) {
   const controller = new AbortController();
   const t = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const r = await fetch(url, {
-      headers: { 'User-Agent': UA, 'Accept': 'image/*' },
-      signal: controller.signal,
-    });
+    const r = await fetch(url, { headers: { 'User-Agent': UA, 'Accept': 'image/*' }, signal: controller.signal });
     if (!r.ok) throw new Error(`Fetch failed ${r.status} for ${url}`);
     return await r.buffer();
   } finally { clearTimeout(t); }
@@ -93,7 +89,6 @@ function buildCandidates(u) {
     const ladder = sizes.map(s => forceVariant(u, s));
     const orig57 = toOriginal57(u);
     const origRaw = new URL(u).toString();
-    // Try size ladder → $_57 → original raw
     return [...ladder, orig57, origRaw];
   } catch {
     return [u];
@@ -102,42 +97,31 @@ function buildCandidates(u) {
 
 // Download and validate the first real image (not a placeholder)
 async function resolveImageBuffer(u) {
-  const MIN_BYTES = 5000; // loosened to handle CDN variants; still filters placeholders
+  const MIN_BYTES = 5000;
   const candidates = buildCandidates(u);
-
   for (const cand of candidates) {
     try {
       const buf = await fetchBufferWithTimeout(cand, 5000);
       if (buf.length < MIN_BYTES) continue;
-      await sharp(buf).metadata(); // decode check
+      await sharp(buf).metadata();
       return { buf, url: cand };
-    } catch { /* try next */ }
+    } catch { /* next */ }
   }
   return null;
 }
 
-// Prepare one PNG slide on a plain black background (no blur, no zoom)
-async function prepareSlidePng(url, outPath) {
+// Prepare one JPEG slide: COVER fit (fills 16:9, crops edges if needed). No blur/bars.
+async function prepareSlideJpg(url, outPath) {
   const resolved = await resolveImageBuffer(url);
   if (!resolved) throw new Error('No reachable/valid image');
-
   const srcBuf = resolved.buf;
 
-  // Foreground: fit-inside (no enlargement), centered
-  const fgBuf = await sharp(srcBuf)
-    .resize(OUTPUT_WIDTH, OUTPUT_HEIGHT, { fit: 'inside', withoutEnlargement: true })
+  const final = await sharp(srcBuf)
+    .resize(OUTPUT_WIDTH, OUTPUT_HEIGHT, { fit: 'cover', position: 'centre' })
+    .jpeg({ quality: 90, mozjpeg: true })
     .toBuffer();
-  const fgMeta = await sharp(fgBuf).metadata();
-  const left = Math.round((OUTPUT_WIDTH  - (fgMeta.width  || 0)) / 2);
-  const top  = Math.round((OUTPUT_HEIGHT - (fgMeta.height || 0)) / 2);
 
-  // Background: solid black canvas
-  const bg = await sharp({
-    create: { width: OUTPUT_WIDTH, height: OUTPUT_HEIGHT, channels: 3, background: '#000000' }
-  }).png().toBuffer();
-
-  const final = await sharp(bg).composite([{ input: fgBuf, left, top }]).png().toBuffer();
-  fs.writeFileSync(outPath, final);
+  fs.writeFileSync(outPath, final); // outPath ends with .jpg
 }
 
 function writeConcatList(slideFiles, durations, listPath) {
@@ -148,51 +132,34 @@ function writeConcatList(slideFiles, durations, listPath) {
   fs.writeFileSync(listPath, lines.join('\n'));
 }
 
+// Render slides → MP4 (1080p landscape, eBay-friendly encode), add silent audio
 async function renderFromSlides(listPath, outputPath) {
   await new Promise((resolve, reject) => {
     const cmd = ffmpeg()
-      // video input: concat of stills
       .input(listPath)
       .inputOptions(['-safe', '0', '-f', 'concat'])
-
-      // add a silent audio track (AAC). We'll cut it to match video with -shortest.
-      .input('anullsrc=cl=stereo:r=44100')
+      .input('anullsrc=cl=stereo:r=44100') // silent track
       .inputFormat('lavfi')
-
-      // keep pixel format and SAR safe
       .videoFilters([`fps=${FPS}`, `setsar=1`])
-
-      // video encoding tuned for eBay
       .outputOptions([
         '-r', String(FPS),
-
-        // H.264 high profile, 4:2:0 for maximum compatibility
         '-c:v', 'libx264',
         '-pix_fmt', 'yuv420p',
         '-profile:v', 'high',
         '-level', '4.1',
-
-        // Slideshow/stills: better compression without mushy motion
         '-tune', 'stillimage',
-
-        // CRF-based quality within a VBV envelope that eBay won’t butcher
         '-crf', '21',
-        '-maxrate', '4M',
-        '-bufsize', '8M',
-        // Set a small GOP so eBay’s transcoder has clean cut points
-        '-g', '60',              // keyframe every 2s @ 30fps
+        '-maxrate', '8M',
+        '-bufsize', '16M',
+        '-g', '60',                 // keyframe ≈2s
         '-keyint_min', '60',
         '-sc_threshold', '0',
-
-        // Audio (silent)
         '-c:a', 'aac',
         '-b:a', '128k',
-
-        // Trim audio to video length, and enable progressive playback
         '-shortest',
         '-movflags', '+faststart'
       ])
-      .size(`${OUTPUT_WIDTH}x${OUTPUT_HEIGHT}`)  // 720×1280 portrait
+      .size(`${OUTPUT_WIDTH}x${OUTPUT_HEIGHT}`)  // 1920×1080 landscape
       .on('start', c => console.log('🎬 FFmpeg:', c))
       .on('stderr', l => console.log('📦', l))
       .on('end', resolve)
@@ -206,7 +173,6 @@ async function renderFromSlides(listPath, outputPath) {
 async function loopMp4Copy(inputMp4, outputMp4, times = 1) {
   times = Math.max(1, Math.floor(times));
   if (times === 1) {
-    // Single pass, just copy/rename
     fs.copyFileSync(inputMp4, outputMp4);
     return;
   }
@@ -241,36 +207,35 @@ async function createSlideshow(images, outputPath, durationSec = DEFAULT_DURATIO
 
   const slideFiles = [];
   try {
-    // 1) Build slides
+    // 1) Build slides (JPEG, cover fit)
     for (let i = 0; i < images.length; i++) {
-      const slidePath = path.join(tmpDir, `slide-${String(i).padStart(3, '0')}.png`);
-      try { await prepareSlidePng(images[i], slidePath); slideFiles.push(slidePath); }
+      const slidePath = path.join(tmpDir, `slide-${String(i).padStart(3, '0')}.jpg`);
+      try { await prepareSlideJpg(images[i], slidePath); slideFiles.push(slidePath); }
       catch (e) { console.error('⚠️ slide prep failed, skipping:', images[i], e.message); }
     }
     if (slideFiles.length === 0) throw new Error('All images failed to load');
 
-    // 2) Write concat list with 1s per image (or provided), hard cuts
+    // 2) 1s per image (or provided), hard cuts
     const per = Math.max(MIN_DURATION, Number(durationSec) || DEFAULT_DURATION);
     const durations = slideFiles.map(() => per);
     const listPath = path.join(tmpDir, 'list.ffconcat');
     writeConcatList(slideFiles, durations, listPath);
 
-    // 3) Render a single-pass MP4
+    // 3) Render a single-pass MP4 (1080p landscape)
     const baseOnce = outputPath.replace(/\.mp4$/, '-once.mp4');
     await renderFromSlides(listPath, baseOnce);
 
-    // 4) If loopCount > 1, produce final by concatenating copies of the same MP4 (no re-encode)
+    // 4) Optional looping (no re-encode)
     const loops = Math.max(1, Number(loopCount) || 1);
     await loopMp4Copy(baseOnce, outputPath, loops);
 
-    // Remove the intermediate single-pass file
     try { fs.unlinkSync(baseOnce); } catch {}
   } finally {
     try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
   }
 }
 
-// Accept /images/... and legacy /00/s/... patterns, force s-l1600.jpg, strip queries; used for input cleaning
+// ---- URL cleaning (unchanged) ----
 function normalizeEbayUrl(u) {
   try {
     const url = new URL(u);
@@ -377,7 +342,7 @@ app.post('/generate', async (req, res) => {
 // ============================================================================
 // Async jobs API (adds loopCount)
 // ============================================================================
-const jobs = new Map(); // jobId -> { status:'queued'|'running'|'done'|'error', url?, error? }
+const jobs = new Map();
 
 async function runJob(jobId, images, duration, loopCount) {
   try {
@@ -399,7 +364,6 @@ async function runJob(jobId, images, duration, loopCount) {
   }
 }
 
-// Enqueue (max 12 eBay gallery images)
 app.post('/jobs', (req, res) => {
   const { imageUrls, duration, loopCount } = req.body || {};
   const cleaned = cleanEbayImages(imageUrls);
@@ -424,7 +388,6 @@ app.get('/jobs/:id', (req, res) => {
   const j = jobs.get(id);
   if (j) return res.status(200).json({ ok: true, ...j });
 
-  // Fallback: if RAM state is gone, check if file exists
   const outputDir = path.join(__dirname, 'public', 'videos');
   const videoFilename = `video-${id}.mp4`;
   const videoPath = path.join(outputDir, videoFilename);
@@ -439,7 +402,6 @@ app.get('/jobs/:id', (req, res) => {
     }
   } catch {}
 
-  // Not found yet → treat as queued (don't 404)
   return res.status(200).json({ ok: true, status: 'queued' });
 });
 
