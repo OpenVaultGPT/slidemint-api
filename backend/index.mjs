@@ -1,4 +1,4 @@
-// index.mjs — SlideMint backend (1080p HQ, eBay-friendly)
+// SlideMint backend — 1080p HQ, JPEG frame pipeline (fast + eBay-friendly)
 
 import express from 'express';
 import { createCanvas, loadImage } from 'canvas';
@@ -19,26 +19,22 @@ app.use(cors());
 app.use(express.static(path.join(__dirname, 'public')));
 app.use(express.json({ limit: '1mb' }));
 
-// ---- config ----
 const PIPEDREAM_URL = process.env.PIPEDREAM_URL || 'https://eos21xm8bj17yt2.m.pipedream.net';
 const FETCH_TIMEOUT_MS = Number(process.env.PD_TIMEOUT_MS || 60000);
 
-// ✅ Healthcheck
+// Health
 app.get('/health', (_, res) => res.status(200).json({ ok: true, service: 'slidemint-api', ts: new Date().toISOString() }));
 
-// 📥 Safe image fetch + resize (avoid upscaling; keep detail; faster)
+// Fast image fetch + pre-resize (avoid upscaling; JPEG is much faster than PNG here)
 async function fetchImageAsCanvasImage(url) {
   try {
     const response = await fetch(url, { timeout: 8000 });
     if (!response.ok) throw new Error(`Image fetch failed: ${url}`);
     const buffer = await response.buffer();
-
-    // HQ path: pre-resize toward canvas width but never enlarge tiny images
     const resized = await sharp(buffer)
       .resize({ width: 1600, withoutEnlargement: true })
-      .png()
+      .jpeg({ quality: 90, mozjpeg: true })
       .toBuffer();
-
     return await loadImage(resized);
   } catch (err) {
     console.error(`❌ Failed to process image: ${url}`, err.message);
@@ -46,10 +42,9 @@ async function fetchImageAsCanvasImage(url) {
   }
 }
 
-// 🎞️ Build slideshow (1080p, CRF-based quality)
+// Slideshow (1080p, CRF-based quality)
 async function createSlideshow(images, outputPath, duration = 2) {
-  const width = 1920;
-  const height = 1080;
+  const width = 1920, height = 1080;
   const tempFramesDir = path.join(__dirname, 'frames', uuidv4());
   fs.mkdirSync(tempFramesDir, { recursive: true });
 
@@ -66,40 +61,34 @@ async function createSlideshow(images, outputPath, duration = 2) {
       const aspect = img.width / img.height;
       let drawWidth = width;
       let drawHeight = width / aspect;
-      if (drawHeight > height) {
-        drawHeight = height;
-        drawWidth = height * aspect;
-      }
+      if (drawHeight > height) { drawHeight = height; drawWidth = height * aspect; }
       const x = (width - drawWidth) / 2;
       const y = (height - drawHeight) / 2;
       ctx.drawImage(img, x, y, drawWidth, drawHeight);
     } else {
-      ctx.fillStyle = '#111';
-      ctx.fillRect(0, 0, width, height);
-      ctx.fillStyle = '#fff';
-      ctx.font = 'bold 36px sans-serif';
-      ctx.textAlign = 'center';
+      ctx.fillStyle = '#111'; ctx.fillRect(0, 0, width, height);
+      ctx.fillStyle = '#fff'; ctx.font = 'bold 36px sans-serif'; ctx.textAlign = 'center';
       ctx.fillText('⚠️ Image failed to load', width / 2, height / 2);
     }
 
-    const framePath = path.join(tempFramesDir, `frame-${String(i).padStart(3, '0')}.png`);
-    fs.writeFileSync(framePath, canvas.toBuffer('image/png'));
+    // Write JPEG frames (faster than PNG)
+    const framePath = path.join(tempFramesDir, `frame-${String(i).padStart(3, '0')}.jpg`);
+    fs.writeFileSync(framePath, canvas.toBuffer('image/jpeg', { quality: 0.92 }));
   }
 
   return new Promise((resolve, reject) => {
     ffmpeg()
-      .input(path.join(tempFramesDir, 'frame-%03d.png'))
-      .inputOptions(['-framerate', (1 / duration).toFixed(2)]) // e.g. duration=2 -> 0.50 fps
+      .input(path.join(tempFramesDir, 'frame-%03d.jpg'))
+      .inputOptions(['-framerate', (1 / duration).toFixed(2)]) // e.g. 0.50 for 2s/slide
       .outputOptions([
-        // 1080p, high quality scaling
         '-vf', 'scale=1920:1080:flags=lanczos',
-        // HQ encode for stills
         '-r', '30',
-        '-preset', 'veryfast',     // quality vs speed (was ultrafast)
-        '-crf', '20',              // lower = higher quality (18–22 typical)
+        '-preset', 'veryfast',
+        '-crf', '20',
         '-tune', 'stillimage',
         '-pix_fmt', 'yuv420p',
         '-movflags', '+faststart',
+        '-max_muxing_queue_size', '1024',
       ])
       .videoCodec('libx264')
       .save(outputPath)
@@ -117,128 +106,63 @@ async function createSlideshow(images, outputPath, duration = 2) {
   });
 }
 
-// ---- helpers for Pipedream proxy (unchanged) ----
+// (proxy helpers unchanged)
 async function fetchWithTimeout(url, options = {}, timeoutMs = FETCH_TIMEOUT_MS) {
   const controller = new AbortController();
   const t = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    return await fetch(url, { ...options, signal: controller.signal });
-  } finally {
-    clearTimeout(t);
-  }
+  try { return await fetch(url, { ...options, signal: controller.signal }); }
+  finally { clearTimeout(t); }
 }
-
 async function parsePipedreamResponse(res) {
   const ct = (res.headers.get('content-type') || '').toLowerCase();
-
-  if (ct.includes('application/json')) {
-    try {
-      const json = await res.json();
-      return { kind: 'json', status: res.status, body: json };
-    } catch {}
-  }
-
+  if (ct.includes('application/json')) { try { const json = await res.json(); return { kind: 'json', status: res.status, body: json }; } catch {} }
   const text = await res.text();
-  try {
-    const json = JSON.parse(text);
-    return { kind: 'json', status: res.status, body: json };
-  } catch {
-    return { kind: 'text', status: res.status, body: text };
-  }
+  try { const json = JSON.parse(text); return { kind: 'json', status: res.status, body: json }; }
+  catch { return { kind: 'text', status: res.status, body: text }; }
 }
 
-// 🔁 Proxy route (frontend ➜ backend ➜ Pipedream) — unchanged
+// Proxy route (unchanged)
 app.post('/generate-proxy', async (req, res) => {
   try {
     const { itemId, images, duration } = req.body || {};
     const cleanId = itemId?.match(/\d{9,12}/)?.[0];
-
     if (!cleanId && !(Array.isArray(images) && images.length)) {
-      return res.status(400).json({
-        ok: false,
-        code: 'BAD_REQUEST',
-        message: 'Provide a valid eBay itemId or images[].',
-        detail: { received: Object.keys(req.body || {}) },
-      });
+      return res.status(400).json({ ok:false, code:'BAD_REQUEST', message:'Provide a valid eBay itemId or images[].', detail:{ received:Object.keys(req.body || {}) } });
     }
-
-    const pdRes = await fetchWithTimeout(
-      PIPEDREAM_URL,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Accept': 'application/json',
-          'User-Agent': 'SlideMint-API/1.0',
-        },
-        body: JSON.stringify(cleanId ? { items: [cleanId], duration } : { images, duration }),
-      },
-      FETCH_TIMEOUT_MS
-    );
+    const pdRes = await fetchWithTimeout(PIPEDREAM_URL, {
+      method: 'POST',
+      headers: { 'Content-Type':'application/json', 'Accept':'application/json', 'User-Agent':'SlideMint-API/1.0' },
+      body: JSON.stringify(cleanId ? { items:[cleanId], duration } : { images, duration }),
+    }, FETCH_TIMEOUT_MS);
 
     const parsed = await parsePipedreamResponse(pdRes);
-
     if (parsed.kind === 'json' && pdRes.ok) {
       const videoUrl = parsed.body.videoUrl || parsed.body.placeholderVideoUrl || null;
       const cleanedUrls = Array.isArray(parsed.body.cleanedUrls) ? parsed.body.cleanedUrls : [];
-
       if (!videoUrl || !/^https?:\/\//i.test(videoUrl)) {
-        return res.status(502).json({
-          ok: false,
-          code: 'NO_VIDEO_URL',
-          message: 'Missing or invalid videoUrl from Pipedream.',
-          detail: { parsed: parsed.body },
-          _meta: { source: 'pipedream', status: parsed.status },
-        });
+        return res.status(502).json({ ok:false, code:'NO_VIDEO_URL', message:'Missing or invalid videoUrl from Pipedream.', detail:{ parsed: parsed.body }, _meta:{ source:'pipedream', status: parsed.status } });
       }
-
-      return res.status(200).json({
-        ok: parsed.body.ok !== false,
-        videoUrl,
-        cleanedUrls,
-        _meta: { source: 'pipedream', status: parsed.status },
-      });
+      return res.status(200).json({ ok: parsed.body.ok !== false, videoUrl, cleanedUrls, _meta:{ source:'pipedream', status: parsed.status } });
     }
-
     if (parsed.kind === 'json' && !pdRes.ok) {
-      return res.status(502).json({
-        ok: false,
-        code: parsed.body.code || 'PIPEDREAM_ERROR',
-        message: parsed.body.message || 'Pipedream responded with an error.',
-        detail: parsed.body,
-        _meta: { source: 'pipedream', status: parsed.status },
-      });
+      return res.status(502).json({ ok:false, code: parsed.body.code || 'PIPEDREAM_ERROR', message: parsed.body.message || 'Pipedream responded with an error.', detail: parsed.body, _meta:{ source:'pipedream', status: parsed.status } });
     }
-
     const preview = typeof parsed.body === 'string' ? parsed.body.slice(0, 500) : '';
     console.error('❌ Pipedream returned non-JSON:', preview);
-    return res.status(502).json({
-      ok: false,
-      code: 'PIPEDREAM_NON_JSON',
-      message: 'Pipedream returned non-JSON (HTML or text).',
-      detail: { preview },
-      _meta: { source: 'pipedream', status: parsed.status },
-    });
+    return res.status(502).json({ ok:false, code:'PIPEDREAM_NON_JSON', message:'Pipedream returned non-JSON (HTML or text).', detail:{ preview }, _meta:{ source:'pipedream', status: parsed.status } });
   } catch (err) {
     const isAbort = err?.name === 'AbortError';
     console.error('🔥 /generate-proxy error:', err?.stack || err?.message || err);
-    return res.status(isAbort ? 504 : 500).json({
-      ok: false,
-      code: isAbort ? 'PIPEDREAM_TIMEOUT' : 'PROXY_EXCEPTION',
-      message: isAbort ? 'Pipedream request timed out.' : 'Unexpected proxy error.',
-      detail: isAbort ? { timeoutMs: FETCH_TIMEOUT_MS } : { error: String(err) },
-    });
+    return res.status(isAbort ? 504 : 500).json({ ok:false, code: isAbort ? 'PIPEDREAM_TIMEOUT' : 'PROXY_EXCEPTION', message: isAbort ? 'Pipedream request timed out.' : 'Unexpected proxy error.', detail: isAbort ? { timeoutMs: FETCH_TIMEOUT_MS } : { error: String(err) } });
   }
 });
 
-// ✅ Direct call with image array (unchanged path)
+// Direct call
 app.post('/generate', async (req, res) => {
   const { imageUrls, duration } = req.body;
-
   if (!Array.isArray(imageUrls) || imageUrls.length === 0) {
     return res.status(400).json({ error: 'Missing or invalid image URLs' });
   }
-
   try {
     const outputDir = path.join(__dirname, 'public', 'videos');
     fs.mkdirSync(outputDir, { recursive: true });
@@ -246,7 +170,7 @@ app.post('/generate', async (req, res) => {
     const videoFilename = `video-${uuidv4()}.mp4`;
     const outputPath = path.join(outputDir, videoFilename);
 
-    await createSlideshow(imageUrls, outputPath, duration || 2);
+    await createSlideshow(imageUrls.slice(0, 12), outputPath, duration || 2);
 
     const videoUrl = `https://slidemint-api.onrender.com/videos/${videoFilename}`;
     return res.status(200).json({ videoUrl });
@@ -256,7 +180,6 @@ app.post('/generate', async (req, res) => {
   }
 });
 
-// 🚀 Launch server
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 SlideMint backend running on port ${PORT}`);
