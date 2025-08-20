@@ -1,5 +1,5 @@
 import express from 'express';
-import { createCanvas, loadImage } from 'canvas';
+// REMOVED node-canvas entirely
 import fetch from 'node-fetch';
 import fs from 'fs';
 import path from 'path';
@@ -15,10 +15,9 @@ const __dirname = path.dirname(__filename);
 const app = express();
 app.use(cors());
 app.use(express.static(path.join(__dirname, 'public')));
-app.use(express.json({ limit: '1mb' }));
+app.use(express.json({ limit: '5mb' })); // a bit more headroom
 
 // ---- config ----
-const PIPEDREAM_URL = process.env.PIPEDREAM_URL || 'https://eos21xm8bj17yt2.m.pipedream.net';
 const FETCH_TIMEOUT_MS = Number(process.env.PD_TIMEOUT_MS || 60000);
 
 // Target video frame (HD landscape for eBay)
@@ -31,94 +30,80 @@ app.get('/health', (_, res) =>
   res.status(200).json({ ok: true, service: 'slidemint-api', ts: new Date().toISOString() })
 );
 
-// 📥 Safe image fetch + PRE-FIT to exact 16:9 frame via sharp (best quality)
-async function fetchImageAsCanvasImage(url) {
+// 📥 Fetch bytes with timeout
+async function fetchBuffer(url, tMs = 8000) {
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), tMs);
   try {
-    const response = await fetch(url, { timeout: 8000 });
-    if (!response.ok) throw new Error(`Image fetch failed: ${url}`);
-    const buffer = await response.buffer();
-
-    // Pre-fit to FRAME_W x FRAME_H using high-quality sharp scaler (contain + pad)
-    const fitted = await sharp(buffer)
-      .resize({
-        width: FRAME_W,
-        height: FRAME_H,
-        fit: 'contain',
-        withoutEnlargement: false,
-        background: { r: 0, g: 0, b: 0, alpha: 1 },
-      })
-      .png()
-      .toBuffer();
-
-    return await loadImage(fitted);
-  } catch (err) {
-    console.error(`❌ Failed to process image: ${url}`, err.message);
-    return null;
+    const r = await fetch(url, { signal: controller.signal });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    return await r.buffer();
+  } finally {
+    clearTimeout(t);
   }
 }
 
-// 🎞️ Build slideshow (landscape, fixed FPS; each image shows for `duration` seconds)
+// 🖼️ Make one 1280x720 JPG frame via sharp (contain + pad)
+async function makeFrameFromUrl(url, outPath) {
+  try {
+    const buf = await fetchBuffer(url, 8000);
+    await sharp(buf)
+      .resize({ width: FRAME_W, height: FRAME_H, fit: 'contain', withoutEnlargement: false, background: '#000' })
+      .jpeg({ quality: 92, mozjpeg: true })
+      .toFile(outPath);
+  } catch (e) {
+    // Fallback: solid placeholder frame (no text to avoid heavy compositing)
+    await sharp({
+      create: { width: FRAME_W, height: FRAME_H, channels: 3, background: '#111' }
+    })
+      .jpeg({ quality: 85, mozjpeg: true })
+      .toFile(outPath);
+    console.error('Frame fallback for URL:', url, '-', e.message);
+  }
+}
+
+// 🎞️ Build slideshow: write JPEG frames, then ffmpeg -> mp4
 async function createSlideshow(images, outputPath, duration = 2) {
   const tempFramesDir = path.join(__dirname, 'frames', uuidv4());
   fs.mkdirSync(tempFramesDir, { recursive: true });
 
   try {
+    // 1) Frames
     for (let i = 0; i < images.length; i++) {
-      console.log(`🖼️ Rendering image ${i + 1}/${images.length}`);
-      const img = await fetchImageAsCanvasImage(images[i]);
-
-      const canvas = createCanvas(FRAME_W, FRAME_H);
-      const ctx = canvas.getContext('2d');
-      ctx.fillStyle = '#000';
-      ctx.fillRect(0, 0, FRAME_W, FRAME_H);
-
-      if (img) {
-        // Already sized by sharp to FRAME_W x FRAME_H with proper letterboxing
-        ctx.drawImage(img, 0, 0, FRAME_W, FRAME_H);
-      } else {
-        ctx.fillStyle = '#111';
-        ctx.fillRect(0, 0, FRAME_W, FRAME_H);
-        ctx.fillStyle = '#fff';
-        ctx.font = 'bold 48px sans-serif';
-        ctx.textAlign = 'center';
-        ctx.fillText('⚠️ Image failed to load', FRAME_W / 2, FRAME_H / 2);
-      }
-
-      const framePath = path.join(tempFramesDir, `frame-${String(i).padStart(3, '0')}.png`);
-      fs.writeFileSync(framePath, canvas.toBuffer('image/png'));
+      const framePath = path.join(tempFramesDir, `frame-${String(i).padStart(3, '0')}.jpg`);
+      console.log(`🖼️ [${i + 1}/${images.length}] ${images[i]}`);
+      await makeFrameFromUrl(images[i], framePath);
     }
 
+    // 2) Encode
     const inputFps = 1 / duration;
 
     await new Promise((resolve, reject) => {
       ffmpeg()
-        .input(path.join(tempFramesDir, 'frame-%03d.png'))
-        // Pass -framerate as separate args (more reliable with fluent-ffmpeg)
-        .inputOptions(['-framerate', inputFps.toFixed(6)])
+        .input(path.join(tempFramesDir, 'frame-%03d.jpg'))
+        .inputOptions(['-framerate', inputFps.toFixed(6)]) // reliable form
         .videoCodec('libx264')
         .outputOptions([
-          `-r ${FPS}`,             // constant 30 fps output
+          `-r ${FPS}`,
           '-pix_fmt yuv420p',
           '-profile:v high',
           '-level 4.1',
-          '-g 60',                 // keyframe every 2s at 30fps
+          '-g 60',
           '-bf 2',
           '-movflags +faststart',
-          '-crf 18',               // 18–20 good; lower = higher quality
+          '-crf 18',
           '-maxrate 8M',
           '-bufsize 16M',
-          // keep colors SDR 709
           '-colorspace bt709',
           '-color_primaries bt709',
           '-color_trc bt709',
-          // faster than "slow", visually same at CRF 18
           '-preset medium',
         ])
-        .on('start', cmd => console.log('🎬 FFmpeg started:', cmd))
+        .on('start', cmd => console.log('🎬 FFmpeg:', cmd))
         .on('stderr', line => console.log('📦 FFmpeg:', line))
         .on('end', resolve)
         .on('error', err => {
-          console.error('❌ FFmpeg pipeline error:', err?.message || err);
+          console.error('❌ FFmpeg error:', err?.message || err);
           reject(err);
         })
         .save(outputPath);
@@ -128,147 +113,31 @@ async function createSlideshow(images, outputPath, duration = 2) {
   }
 }
 
-// ---- helpers for Pipedream proxy ----
-async function fetchWithTimeout(url, options = {}, timeoutMs = FETCH_TIMEOUT_MS) {
-  const controller = new AbortController();
-  const t = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    return await fetch(url, { ...options, signal: controller.signal });
-  } finally {
-    clearTimeout(t);
-  }
-}
-
-async function parsePipedreamResponse(res) {
-  const ct = (res.headers.get('content-type') || '').toLowerCase();
-
-  if (ct.includes('application/json')) {
-    try {
-      const json = await res.json();
-      return { kind: 'json', status: res.status, body: json };
-    } catch {}
-  }
-
-  const text = await res.text();
-  try {
-    const json = JSON.parse(text);
-    return { kind: 'json', status: res.status, body: json };
-  } catch {
-    return { kind: 'text', status: res.status, body: text };
-  }
-}
-
-// 🔁 Proxy route (frontend ➜ backend ➜ Pipedream)
-app.post('/generate-proxy', async (req, res) => {
-  try {
-    const { itemId, images, duration } = req.body || {};
-    const cleanId = itemId?.match(/\d{9,12}/)?.[0];
-
-    if (!cleanId && !(Array.isArray(images) && images.length)) {
-      return res.status(400).json({
-        ok: false,
-        code: 'BAD_REQUEST',
-        message: 'Provide a valid eBay itemId or images[].',
-        detail: { received: Object.keys(req.body || {}) },
-      });
-    }
-
-    const pdRes = await fetchWithTimeout(
-      PIPEDREAM_URL,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Accept': 'application/json',
-          'User-Agent': 'SlideMint-API/1.0',
-        },
-        body: JSON.stringify(cleanId ? { items: [cleanId], duration } : { images, duration }),
-      },
-      FETCH_TIMEOUT_MS
-    );
-
-    const parsed = await parsePipedreamResponse(pdRes);
-
-    if (parsed.kind === 'json' && pdRes.ok) {
-      const videoUrl = parsed.body.videoUrl || parsed.body.placeholderVideoUrl || null;
-      const cleanedUrls = Array.isArray(parsed.body.cleanedUrls) ? parsed.body.cleanedUrls : [];
-
-      if (!videoUrl || !/^https?:\/\//i.test(videoUrl)) {
-        return res.status(502).json({
-          ok: false,
-          code: 'NO_VIDEO_URL',
-          message: 'Missing or invalid videoUrl from Pipedream.',
-          detail: { parsed: parsed.body },
-          _meta: { source: 'pipedream', status: parsed.status },
-        });
-      }
-
-      return res.status(200).json({
-        ok: parsed.body.ok !== false,
-        videoUrl,
-        cleanedUrls,
-        _meta: { source: 'pipedream', status: parsed.status },
-      });
-    }
-
-    if (parsed.kind === 'json' && !pdRes.ok) {
-      return res.status(502).json({
-        ok: false,
-        code: parsed.body.code || 'PIPEDREAM_ERROR',
-        message: parsed.body.message || 'Pipedream responded with an error.',
-        detail: parsed.body,
-        _meta: { source: 'pipedream', status: parsed.status },
-      });
-    }
-
-    const preview = typeof parsed.body === 'string' ? parsed.body.slice(0, 500) : '';
-    console.error('❌ Pipedream returned non-JSON:', preview);
-    return res.status(502).json({
-      ok: false,
-      code: 'PIPEDREAM_NON_JSON',
-      message: 'Pipedream returned non-JSON (HTML or text).',
-      detail: { preview },
-      _meta: { source: 'pipedream', status: parsed.status },
-    });
-  } catch (err) {
-    const isAbort = err?.name === 'AbortError';
-    console.error('🔥 /generate-proxy error:', err?.stack || err?.message || err);
-    return res.status(isAbort ? 504 : 500).json({
-      ok: false,
-      code: isAbort ? 'PIPEDREAM_TIMEOUT' : 'PROXY_EXCEPTION',
-      message: isAbort ? 'Pipedream request timed out.' : 'Unexpected proxy error.',
-      detail: isAbort ? { timeoutMs: FETCH_TIMEOUT_MS } : { error: String(err) },
-    });
-  }
-});
-
-// ✅ Direct call with image array
+// 🔁 Direct generate (used by PD)
 app.post('/generate', async (req, res) => {
-  const { imageUrls, duration } = req.body;
-
-  if (!Array.isArray(imageUrls) || imageUrls.length === 0) {
-    return res.status(400).json({ error: 'Missing or invalid image URLs' });
-  }
-
   try {
+    const { imageUrls, duration } = req.body || {};
+    if (!Array.isArray(imageUrls) || imageUrls.length === 0) {
+      return res.status(400).json({ error: 'Missing or invalid image URLs' });
+    }
+
     const outputDir = path.join(__dirname, 'public', 'videos');
     fs.mkdirSync(outputDir, { recursive: true });
 
     const videoFilename = `video-${uuidv4()}.mp4`;
     const outputPath = path.join(outputDir, videoFilename);
 
-    await createSlideshow(imageUrls, outputPath, duration || 2);
+    await createSlideshow(imageUrls, outputPath, Number(duration) || 2);
 
     const videoUrl = `https://slidemint-api.onrender.com/videos/${videoFilename}`;
     return res.status(200).json({ videoUrl });
   } catch (err) {
-    console.error('❌ Error generating video:', err.stack || err.message);
-    return res.status(500).json({ error: 'Video generation failed' });
+    console.error('🔻 /generate failed:', err?.stack || err?.message || err);
+    // Always return JSON so PD never sees an HTML 502
+    return res.status(500).json({ error: 'Video generation failed', detail: String(err?.message || err) });
   }
 });
 
 // 🚀 Launch server
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`🚀 SlideMint backend running on port ${PORT}`);
-});
+app.listen(PORT, () => console.log(`🚀 SlideMint backend listening on :${PORT}`));
