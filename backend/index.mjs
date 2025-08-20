@@ -21,9 +21,9 @@ app.use(express.json({ limit: '1mb' }));
 const PIPEDREAM_URL = process.env.PIPEDREAM_URL || 'https://eos21xm8bj17yt2.m.pipedream.net';
 const FETCH_TIMEOUT_MS = Number(process.env.PD_TIMEOUT_MS || 60000);
 
-// Target video frame (use 1280x720 if you prefer HD)
-const FRAME_W = 1920;
-const FRAME_H = 1080;
+// Target video frame (HD landscape for eBay)
+const FRAME_W = 1280;
+const FRAME_H = 720;
 const FPS = 30;
 
 // ✅ Healthcheck
@@ -38,13 +38,13 @@ async function fetchImageAsCanvasImage(url) {
     if (!response.ok) throw new Error(`Image fetch failed: ${url}`);
     const buffer = await response.buffer();
 
-    // Pre-fit to FRAME_W x FRAME_H using high-quality sharp scaler
+    // Pre-fit to FRAME_W x FRAME_H using high-quality sharp scaler (contain + pad)
     const fitted = await sharp(buffer)
       .resize({
         width: FRAME_W,
         height: FRAME_H,
         fit: 'contain',
-        withoutEnlargement: false, // allow upscale here so *we* control scaling, not eBay
+        withoutEnlargement: false,
         background: { r: 0, g: 0, b: 0, alpha: 1 },
       })
       .png()
@@ -88,13 +88,13 @@ async function createSlideshow(images, outputPath, duration = 2) {
       fs.writeFileSync(framePath, canvas.toBuffer('image/png'));
     }
 
-    // Input framerate = one frame per "duration" seconds
     const inputFps = 1 / duration;
 
     await new Promise((resolve, reject) => {
       ffmpeg()
         .input(path.join(tempFramesDir, 'frame-%03d.png'))
-        .inputOptions([`-framerate ${inputFps.toFixed(6)}`])
+        // Pass -framerate as separate args (more reliable with fluent-ffmpeg)
+        .inputOptions(['-framerate', inputFps.toFixed(6)])
         .videoCodec('libx264')
         .outputOptions([
           `-r ${FPS}`,             // constant 30 fps output
@@ -104,20 +104,23 @@ async function createSlideshow(images, outputPath, duration = 2) {
           '-g 60',                 // keyframe every 2s at 30fps
           '-bf 2',
           '-movflags +faststart',
-          '-crf 18',               // 18–20 is good; lower = higher quality
+          '-crf 18',               // 18–20 good; lower = higher quality
           '-maxrate 8M',
           '-bufsize 16M',
-          // keep colors in SDR 709 to avoid odd re-maps
+          // keep colors SDR 709
           '-colorspace bt709',
           '-color_primaries bt709',
           '-color_trc bt709',
-          // quality over speed; you can switch to "medium" if needed
-          '-preset slow',
+          // faster than "slow", visually same at CRF 18
+          '-preset medium',
         ])
         .on('start', cmd => console.log('🎬 FFmpeg started:', cmd))
         .on('stderr', line => console.log('📦 FFmpeg:', line))
         .on('end', resolve)
-        .on('error', reject)
+        .on('error', err => {
+          console.error('❌ FFmpeg pipeline error:', err?.message || err);
+          reject(err);
+        })
         .save(outputPath);
     });
   } finally {
@@ -239,7 +242,7 @@ app.post('/generate-proxy', async (req, res) => {
   }
 });
 
-// ✅ Direct call with image array (kept intact)
+// ✅ Direct call with image array
 app.post('/generate', async (req, res) => {
   const { imageUrls, duration } = req.body;
 
