@@ -27,7 +27,7 @@ const JOB_LIMIT_MS     = Number(process.env.JOB_LIMIT_MS || 4 * 60 * 1000); // 4
 // Slideshow constants
 const OUTPUT_WIDTH = 720;
 const OUTPUT_HEIGHT = 1280;
-const FPS = 24;
+const FPS = 30;
 const DEFAULT_DURATION = 1.0;   // ← 1s per image by default
 const MIN_DURATION = 0.5;
 
@@ -150,28 +150,55 @@ function writeConcatList(slideFiles, durations, listPath) {
 
 async function renderFromSlides(listPath, outputPath) {
   await new Promise((resolve, reject) => {
-    ffmpeg()
+    const cmd = ffmpeg()
+      // video input: concat of stills
       .input(listPath)
       .inputOptions(['-safe', '0', '-f', 'concat'])
+
+      // add a silent audio track (AAC). We'll cut it to match video with -shortest.
+      .input('anullsrc=cl=stereo:r=44100')
+      .inputFormat('lavfi')
+
+      // keep pixel format and SAR safe
       .videoFilters([`fps=${FPS}`, `setsar=1`])
+
+      // video encoding tuned for eBay
       .outputOptions([
         '-r', String(FPS),
+
+        // H.264 high profile, 4:2:0 for maximum compatibility
         '-c:v', 'libx264',
         '-pix_fmt', 'yuv420p',
-        '-preset', 'fast',
         '-profile:v', 'high',
         '-level', '4.1',
+
+        // Slideshow/stills: better compression without mushy motion
+        '-tune', 'stillimage',
+
+        // CRF-based quality within a VBV envelope that eBay won’t butcher
         '-crf', '21',
-        '-maxrate', '5M',
-        '-bufsize', '10M',
+        '-maxrate', '4M',
+        '-bufsize', '8M',
+        // Set a small GOP so eBay’s transcoder has clean cut points
+        '-g', '60',              // keyframe every 2s @ 30fps
+        '-keyint_min', '60',
+        '-sc_threshold', '0',
+
+        // Audio (silent)
+        '-c:a', 'aac',
+        '-b:a', '128k',
+
+        // Trim audio to video length, and enable progressive playback
+        '-shortest',
         '-movflags', '+faststart'
       ])
-      .size(`${OUTPUT_WIDTH}x${OUTPUT_HEIGHT}`)
+      .size(`${OUTPUT_WIDTH}x${OUTPUT_HEIGHT}`)  // 720×1280 portrait
       .on('start', c => console.log('🎬 FFmpeg:', c))
       .on('stderr', l => console.log('📦', l))
       .on('end', resolve)
-      .on('error', reject)
-      .save(outputPath);
+      .on('error', reject);
+
+    cmd.save(outputPath);
   });
 }
 
