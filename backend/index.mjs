@@ -1,9 +1,3 @@
-// index.mjs — SlideMint backend (1080p landscape, original logic kept)
-// This is your original working file with ONLY the dimension/resize updates:
-//  - Canvas: 1920x1080 (was 720x1280)
-//  - Sharp pre-resize: 1600px width (was 720)
-//  - FFmpeg scale: 1920:-2 (was 720:-2)
-// Everything else is unchanged.
 
 import express from 'express';
 import { createCanvas, loadImage } from 'canvas';
