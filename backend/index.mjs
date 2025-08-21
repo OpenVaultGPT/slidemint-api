@@ -1,5 +1,5 @@
 import express from 'express';
-// REMOVED node-canvas entirely
+import { createCanvas, loadImage } from 'canvas';
 import fetch from 'node-fetch';
 import fs from 'fs';
 import path from 'path';
@@ -15,129 +15,244 @@ const __dirname = path.dirname(__filename);
 const app = express();
 app.use(cors());
 app.use(express.static(path.join(__dirname, 'public')));
-app.use(express.json({ limit: '5mb' })); // a bit more headroom
+app.use(express.json({ limit: '1mb' }));
 
 // ---- config ----
+const PIPEDREAM_URL = process.env.PIPEDREAM_URL || 'https://eos21xm8bj17yt2.m.pipedream.net';
 const FETCH_TIMEOUT_MS = Number(process.env.PD_TIMEOUT_MS || 60000);
 
-// Target video frame (HD landscape for eBay)
-const FRAME_W = 1280;
-const FRAME_H = 720;
-const FPS = 30;
-
 // ✅ Healthcheck
-app.get('/health', (_, res) =>
-  res.status(200).json({ ok: true, service: 'slidemint-api', ts: new Date().toISOString() })
-);
+app.get('/health', (_, res) => res.status(200).json({ ok: true, service: 'slidemint-api', ts: new Date().toISOString() }));
 
-// 📥 Fetch bytes with timeout
-async function fetchBuffer(url, tMs = 8000) {
-  const controller = new AbortController();
-  const t = setTimeout(() => controller.abort(), tMs);
+// 📥 Safe image fetch + resize
+async function fetchImageAsCanvasImage(url) {
   try {
-    const r = await fetch(url, { signal: controller.signal });
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    return await r.buffer();
+    const response = await fetch(url, { timeout: 8000 });
+    if (!response.ok) throw new Error(`Image fetch failed: ${url}`);
+    const buffer = await response.buffer();
+    const resized = await sharp(buffer).resize({ width: 720 }).png().toBuffer();
+    return await loadImage(resized);
+  } catch (err) {
+    console.error(`❌ Failed to process image: ${url}`, err.message);
+    return null;
+  }
+}
+
+// 🎞️ Build slideshow
+async function createSlideshow(images, outputPath, duration = 2) {
+  // 🔁 CHANGED: switch to landscape 16:9
+  const width = 1280;
+  const height = 720;
+
+  const tempFramesDir = path.join(__dirname, 'frames', uuidv4());
+  fs.mkdirSync(tempFramesDir, { recursive: true });
+
+  for (let i = 0; i < images.length; i++) {
+    console.log(`🖼️ Rendering image ${i + 1}/${images.length}`);
+    const img = await fetchImageAsCanvasImage(images[i]);
+
+    const canvas = createCanvas(width, height);
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, width, height);
+
+    if (img) {
+      const aspect = img.width / img.height;
+      let drawWidth = width;
+      let drawHeight = width / aspect;
+      if (drawHeight > height) {
+        drawHeight = height;
+        drawWidth = height * aspect;
+      }
+      const x = (width - drawWidth) / 2;
+      const y = (height - drawHeight) / 2;
+      ctx.drawImage(img, x, y, drawWidth, drawHeight);
+    } else {
+      ctx.fillStyle = '#111';
+      ctx.fillRect(0, 0, width, height);
+      ctx.fillStyle = '#fff';
+      ctx.font = 'bold 36px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('⚠️ Image failed to load', width / 2, height / 2);
+    }
+
+    const framePath = path.join(tempFramesDir, `frame-${String(i).padStart(3, '0')}.png`);
+    fs.writeFileSync(framePath, canvas.toBuffer('image/png'));
+  }
+
+  return new Promise((resolve, reject) => {
+    ffmpeg()
+      .input(path.join(tempFramesDir, 'frame-%03d.png'))
+      .inputOptions(['-framerate', (1 / duration).toFixed(2)])
+      .outputOptions([
+        // 🔁 CHANGED: scale to 1280 width, keep even height
+        '-vf', 'scale=1280:-2',
+        '-r', '30',
+        '-preset', 'ultrafast',
+        '-pix_fmt', 'yuv420p',
+        '-movflags', '+faststart',
+      ])
+      .videoCodec('libx264')
+      .save(outputPath)
+      .on('start', cmd => console.log('🎬 FFmpeg started:', cmd))
+      .on('stderr', line => console.log('📦 FFmpeg:', line))
+      .on('end', () => {
+        console.log('✅ FFmpeg finished');
+        fs.rmSync(tempFramesDir, { recursive: true, force: true });
+        resolve();
+      })
+      .on('error', err => {
+        console.error('❌ FFmpeg error:', err.message);
+        reject(err);
+      });
+  });
+}
+
+// ---- helpers for Pipedream proxy ----
+async function fetchWithTimeout(url, options = {}, timeoutMs = FETCH_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
   } finally {
     clearTimeout(t);
   }
 }
 
-// 🖼️ Make one 1280x720 JPG frame via sharp (contain + pad)
-async function makeFrameFromUrl(url, outPath) {
+async function parsePipedreamResponse(res) {
+  const ct = (res.headers.get('content-type') || '').toLowerCase();
+
+  // Try JSON if content-type shows it
+  if (ct.includes('application/json')) {
+    try {
+      const json = await res.json();
+      return { kind: 'json', status: res.status, body: json };
+    } catch {
+      // fall through
+    }
+  }
+
+  // Otherwise read text and try to JSON.parse it
+  const text = await res.text();
   try {
-    const buf = await fetchBuffer(url, 8000);
-    await sharp(buf)
-      .resize({ width: FRAME_W, height: FRAME_H, fit: 'contain', withoutEnlargement: false, background: '#000' })
-      .jpeg({ quality: 92, mozjpeg: true })
-      .toFile(outPath);
-  } catch (e) {
-    // Fallback: solid placeholder frame (no text to avoid heavy compositing)
-    await sharp({
-      create: { width: FRAME_W, height: FRAME_H, channels: 3, background: '#111' }
-    })
-      .jpeg({ quality: 85, mozjpeg: true })
-      .toFile(outPath);
-    console.error('Frame fallback for URL:', url, '-', e.message);
+    const json = JSON.parse(text);
+    return { kind: 'json', status: res.status, body: json };
+  } catch {
+    return { kind: 'text', status: res.status, body: text };
   }
 }
 
-// 🎞️ Build slideshow: write JPEG frames, then ffmpeg -> mp4
-async function createSlideshow(images, outputPath, duration = 2) {
-  const tempFramesDir = path.join(__dirname, 'frames', uuidv4());
-  fs.mkdirSync(tempFramesDir, { recursive: true });
-
+// 🔁 Proxy route (frontend ➜ backend ➜ Pipedream)
+app.post('/generate-proxy', async (req, res) => {
   try {
-    // 1) Frames
-    for (let i = 0; i < images.length; i++) {
-      const framePath = path.join(tempFramesDir, `frame-${String(i).padStart(3, '0')}.jpg`);
-      console.log(`🖼️ [${i + 1}/${images.length}] ${images[i]}`);
-      await makeFrameFromUrl(images[i], framePath);
+    const { itemId, images, duration } = req.body || {};
+    const cleanId = itemId?.match(/\d{9,12}/)?.[0];
+
+    if (!cleanId && !(Array.isArray(images) && images.length)) {
+      return res.status(400).json({
+        ok: false,
+        code: 'BAD_REQUEST',
+        message: 'Provide a valid eBay itemId or images[].',
+        detail: { received: Object.keys(req.body || {}) },
+      });
     }
 
-    // 2) Encode
-    const inputFps = 1 / duration;
+    const pdRes = await fetchWithTimeout(
+      PIPEDREAM_URL,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+          'User-Agent': 'SlideMint-API/1.0',
+        },
+        body: JSON.stringify(cleanId ? { items: [cleanId], duration } : { images, duration }),
+      },
+      FETCH_TIMEOUT_MS
+    );
 
-    await new Promise((resolve, reject) => {
-      ffmpeg()
-        .input(path.join(tempFramesDir, 'frame-%03d.jpg'))
-        .inputOptions(['-framerate', inputFps.toFixed(6)]) // reliable form
-        .videoCodec('libx264')
-        .outputOptions([
-          `-r ${FPS}`,
-          '-pix_fmt yuv420p',
-          '-profile:v high',
-          '-level 4.1',
-          '-g 60',
-          '-bf 2',
-          '-movflags +faststart',
-          '-crf 18',
-          '-maxrate 8M',
-          '-bufsize 16M',
-          '-colorspace bt709',
-          '-color_primaries bt709',
-          '-color_trc bt709',
-          '-preset medium',
-        ])
-        .on('start', cmd => console.log('🎬 FFmpeg:', cmd))
-        .on('stderr', line => console.log('📦 FFmpeg:', line))
-        .on('end', resolve)
-        .on('error', err => {
-          console.error('❌ FFmpeg error:', err?.message || err);
-          reject(err);
-        })
-        .save(outputPath);
+    const parsed = await parsePipedreamResponse(pdRes);
+
+    if (parsed.kind === 'json' && pdRes.ok) {
+      const videoUrl = parsed.body.videoUrl || parsed.body.placeholderVideoUrl || null;
+      const cleanedUrls = Array.isArray(parsed.body.cleanedUrls) ? parsed.body.cleanedUrls : [];
+
+      if (!videoUrl || !/^https?:\/\//i.test(videoUrl)) {
+        return res.status(502).json({
+          ok: false,
+          code: 'NO_VIDEO_URL',
+          message: 'Missing or invalid videoUrl from Pipedream.',
+          detail: { parsed: parsed.body },
+          _meta: { source: 'pipedream', status: parsed.status },
+        });
+      }
+
+      return res.status(200).json({
+        ok: parsed.body.ok !== false,
+        videoUrl,
+        cleanedUrls,
+        _meta: { source: 'pipedream', status: parsed.status },
+      });
+    }
+
+    if (parsed.kind === 'json' && !pdRes.ok) {
+      return res.status(502).json({
+        ok: false,
+        code: parsed.body.code || 'PIPEDREAM_ERROR',
+        message: parsed.body.message || 'Pipedream responded with an error.',
+        detail: parsed.body,
+        _meta: { source: 'pipedream', status: parsed.status },
+      });
+    }
+
+    const preview = typeof parsed.body === 'string' ? parsed.body.slice(0, 500) : '';
+    console.error('❌ Pipedream returned non-JSON:', preview);
+    return res.status(502).json({
+      ok: false,
+      code: 'PIPEDREAM_NON_JSON',
+      message: 'Pipedream returned non-JSON (HTML or text).',
+      detail: { preview },
+      _meta: { source: 'pipedream', status: parsed.status },
     });
-  } finally {
-    fs.rmSync(tempFramesDir, { recursive: true, force: true });
+  } catch (err) {
+    const isAbort = err?.name === 'AbortError';
+    console.error('🔥 /generate-proxy error:', err?.stack || err?.message || err);
+    return res.status(isAbort ? 504 : 500).json({
+      ok: false,
+      code: isAbort ? 'PIPEDREAM_TIMEOUT' : 'PROXY_EXCEPTION',
+      message: isAbort ? 'Pipedream request timed out.' : 'Unexpected proxy error.',
+      detail: isAbort ? { timeoutMs: FETCH_TIMEOUT_MS } : { error: String(err) },
+    });
   }
-}
+});
 
-// 🔁 Direct generate (used by PD)
+// ✅ Direct call with image array (kept intact)
 app.post('/generate', async (req, res) => {
-  try {
-    const { imageUrls, duration } = req.body || {};
-    if (!Array.isArray(imageUrls) || imageUrls.length === 0) {
-      return res.status(400).json({ error: 'Missing or invalid image URLs' });
-    }
+  const { imageUrls, duration } = req.body;
 
+  if (!Array.isArray(imageUrls) || imageUrls.length === 0) {
+    return res.status(400).json({ error: 'Missing or invalid image URLs' });
+  }
+
+  try {
     const outputDir = path.join(__dirname, 'public', 'videos');
     fs.mkdirSync(outputDir, { recursive: true });
 
     const videoFilename = `video-${uuidv4()}.mp4`;
     const outputPath = path.join(outputDir, videoFilename);
 
-    await createSlideshow(imageUrls, outputPath, Number(duration) || 2);
+    await createSlideshow(imageUrls, outputPath, duration || 2);
 
     const videoUrl = `https://slidemint-api.onrender.com/videos/${videoFilename}`;
     return res.status(200).json({ videoUrl });
   } catch (err) {
-    console.error('🔻 /generate failed:', err?.stack || err?.message || err);
-    // Always return JSON so PD never sees an HTML 502
-    return res.status(500).json({ error: 'Video generation failed', detail: String(err?.message || err) });
+    console.error('❌ Error generating video:', err.stack || err.message);
+    return res.status(500).json({ error: 'Video generation failed' });
   }
 });
 
 // 🚀 Launch server
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 SlideMint backend listening on :${PORT}`));
+app.listen(PORT, () => {
+  console.log(`🚀 SlideMint backend running on port ${PORT}`);
+});
