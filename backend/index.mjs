@@ -94,7 +94,7 @@ async function createSlideshow(images, outputPath, duration = 2) {
         '-r', '30',
         '-profile:v', 'high',
         '-level', '4.0',
-        '-preset', 'slow',
+        '-preset', 'medium',
         '-tune', 'stillimage',
         '-crf', '17',
         '-g', '60',
