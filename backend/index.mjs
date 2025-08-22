@@ -33,6 +33,7 @@ async function fetchImageAsCanvasImage(url) {
     // CHANGED: avoid pre-shrinking to 720; prep at 1280 width, no enlargement
     const resized = await sharp(buffer)
       .resize({ width: 1280, withoutEnlargement: true })
+      .sharpen(0.3)   
       .png()
       .toBuffer();
     return await loadImage(resized);
@@ -90,7 +91,7 @@ async function createSlideshow(images, outputPath, duration = 2) {
       .inputOptions(['-framerate', (1 / duration).toFixed(2)])
       .outputOptions([
         // CHANGED: high-quality master for eBay re-encode
-          '-vf', 'scale=1280:720:flags=lanczos,format=yuv420p',
+          '-vf', 'scale=1280:720:flags=lanczos,unsharp=3:3:0.6:3:3:0.0,format=yuv420p',
   '-r', '30',
   '-profile:v', 'high',
   '-level', '4.0',
@@ -101,6 +102,9 @@ async function createSlideshow(images, outputPath, duration = 2) {
   '-g', '60',
   '-keyint_min', '60',
   '-sc_threshold', '0',
+  '-colorspace', 'bt709',
+  '-color_primaries', 'bt709',
+  '-color_trc', 'bt709',
   '-movflags', '+faststart',
 ])
       .videoCodec('libx264')
