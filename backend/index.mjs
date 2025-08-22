@@ -90,18 +90,19 @@ async function createSlideshow(images, outputPath, duration = 2) {
       .inputOptions(['-framerate', (1 / duration).toFixed(2)])
       .outputOptions([
         // CHANGED: high-quality master for eBay re-encode
-        '-vf', 'scale=1280:720:flags=lanczos,format=yuv420p',
-        '-r', '30',
-        '-profile:v', 'high',
-        '-level', '4.0',
-        '-preset', 'medium',
-        '-tune', 'stillimage',
-        '-crf', '17',
-        '-g', '60',
-        '-keyint_min', '60',
-        '-sc_threshold', '0',
-        '-movflags', '+faststart',
-      ])
+          '-vf', 'scale=1280:720:flags=lanczos,format=yuv420p',
+  '-r', '30',
+  '-profile:v', 'high',
+  '-level', '4.0',
+  '-preset', 'fast',
+  '-threads', '2',
+  '-tune', 'stillimage',
+  '-crf', '18',
+  '-g', '60',
+  '-keyint_min', '60',
+  '-sc_threshold', '0',
+  '-movflags', '+faststart',
+])
       .videoCodec('libx264')
       .save(outputPath)
       .on('start', cmd => console.log('🎬 FFmpeg started:', cmd))
