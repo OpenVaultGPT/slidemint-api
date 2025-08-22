@@ -30,7 +30,11 @@ async function fetchImageAsCanvasImage(url) {
     const response = await fetch(url, { timeout: 8000 });
     if (!response.ok) throw new Error(`Image fetch failed: ${url}`);
     const buffer = await response.buffer();
-    const resized = await sharp(buffer).resize({ width: 720 }).png().toBuffer();
+    // CHANGED: avoid pre-shrinking to 720; prep at 1280 width, no enlargement
+    const resized = await sharp(buffer)
+      .resize({ width: 1280, withoutEnlargement: true })
+      .png()
+      .toBuffer();
     return await loadImage(resized);
   } catch (err) {
     console.error(`❌ Failed to process image: ${url}`, err.message);
@@ -40,7 +44,7 @@ async function fetchImageAsCanvasImage(url) {
 
 // 🎞️ Build slideshow
 async function createSlideshow(images, outputPath, duration = 2) {
-  // 🔁 CHANGED: switch to landscape 16:9
+  // Landscape 16:9
   const width = 1280;
   const height = 720;
 
@@ -85,11 +89,17 @@ async function createSlideshow(images, outputPath, duration = 2) {
       .input(path.join(tempFramesDir, 'frame-%03d.png'))
       .inputOptions(['-framerate', (1 / duration).toFixed(2)])
       .outputOptions([
-        // 🔁 CHANGED: scale to 1280 width, keep even height
-        '-vf', 'scale=1280:-2',
+        // CHANGED: high-quality master for eBay re-encode
+        '-vf', 'scale=1280:720:flags=lanczos,format=yuv420p',
         '-r', '30',
-        '-preset', 'ultrafast',
-        '-pix_fmt', 'yuv420p',
+        '-profile:v', 'high',
+        '-level', '4.0',
+        '-preset', 'slow',
+        '-tune', 'stillimage',
+        '-crf', '17',
+        '-g', '60',
+        '-keyint_min', '60',
+        '-sc_threshold', '0',
         '-movflags', '+faststart',
       ])
       .videoCodec('libx264')
@@ -122,17 +132,13 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = FETCH_TIMEOUT_MS)
 async function parsePipedreamResponse(res) {
   const ct = (res.headers.get('content-type') || '').toLowerCase();
 
-  // Try JSON if content-type shows it
   if (ct.includes('application/json')) {
     try {
       const json = await res.json();
       return { kind: 'json', status: res.status, body: json };
-    } catch {
-      // fall through
-    }
+    } catch {}
   }
 
-  // Otherwise read text and try to JSON.parse it
   const text = await res.text();
   try {
     const json = JSON.parse(text);
