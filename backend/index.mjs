@@ -21,8 +21,74 @@ app.use(express.json({ limit: '1mb' }));
 const PIPEDREAM_URL = process.env.PIPEDREAM_URL || 'https://eos21xm8bj17yt2.m.pipedream.net';
 const FETCH_TIMEOUT_MS = Number(process.env.PD_TIMEOUT_MS || 60000);
 
+// ====================================================
+// Paywall (soft) — defaults to OFF so nothing breaks
+// ====================================================
+const PAYWALL_MODE = process.env.PAYWALL_MODE || 'off'; // 'off' | 'license'
+const STRICT_LICENSE = process.env.STRICT_LICENSE === 'true'; // if LS is down: true->block, false->allow
+const LEMON_VALIDATE_URL = 'https://api.lemonsqueezy.com/v1/licenses/validate';
+
+// tiny in-memory cache (avoid hammering Lemon)
+const _licCache = new Map(); // licenseKey -> { ok, ts }
+const LIC_TTL_MS = 1000 * 60 * 60 * 6; // 6 hours
+
+async function validateLicenseKey(licenseKey) {
+  if (!licenseKey) return { ok: false, reason: 'missing' };
+
+  const hit = _licCache.get(licenseKey);
+  if (hit && Date.now() - hit.ts < LIC_TTL_MS) return { ok: hit.ok, cached: true };
+
+  try {
+    const body = new URLSearchParams();
+    body.set('license_key', licenseKey);
+    const r = await fetch(LEMON_VALIDATE_URL, {
+      method: 'POST',
+      headers: { Accept: 'application/json' },
+      body
+    });
+    const data = await r.json().catch(() => ({}));
+    const ok = !!data?.valid;
+    _licCache.set(licenseKey, { ok, ts: Date.now() });
+    return { ok, data };
+  } catch (e) {
+    console.error('⚠️ Lemon validate error:', e.message || e);
+    // fail-open unless STRICT_LICENSE=true
+    return { ok: !STRICT_LICENSE, degraded: true, reason: 'lemon_error' };
+  }
+}
+
+async function licenseGuardSoft(req, res, next) {
+  if (PAYWALL_MODE === 'off') return next();
+  const key =
+    req.headers['x-license-key'] ||
+    req.query.licenseKey ||
+    (req.body && req.body.licenseKey);
+  const result = await validateLicenseKey(key);
+  if (!result.ok) {
+    return res.status(402).json({ ok: false, error: 'License required/invalid', mode: PAYWALL_MODE });
+  }
+  req.licenseKey = key;
+  next();
+}
+
+// public endpoint for your UI to pre-check a key
+app.post('/api/license/validate', async (req, res) => {
+  try {
+    const { licenseKey } = req.body || {};
+    const out = await validateLicenseKey(licenseKey);
+    return res.status(out.ok ? 200 : 401).json({ ok: out.ok });
+  } catch {
+    return res.status(500).json({ ok: false, error: 'validation_failed' });
+  }
+});
+
+// helper: conditionally apply the guard without breaking anything
+const maybeGuard = PAYWALL_MODE === 'off' ? [] : [licenseGuardSoft];
+
 // ✅ Healthcheck
-app.get('/health', (_, res) => res.status(200).json({ ok: true, service: 'slidemint-api', ts: new Date().toISOString() }));
+app.get('/health', (_, res) =>
+  res.status(200).json({ ok: true, service: 'slidemint-api', ts: new Date().toISOString() })
+);
 
 // 📥 Safe image fetch + resize
 async function fetchImageAsCanvasImage(url) {
@@ -30,10 +96,10 @@ async function fetchImageAsCanvasImage(url) {
     const response = await fetch(url, { timeout: 8000 });
     if (!response.ok) throw new Error(`Image fetch failed: ${url}`);
     const buffer = await response.buffer();
-    // CHANGED: avoid pre-shrinking to 720; prep at 1280 width, no enlargement
+    // prep at 1280 width, no enlargement
     const resized = await sharp(buffer)
       .resize({ width: 1280, withoutEnlargement: true })
-      .sharpen(0.3)   
+      .sharpen(0.3)
       .png()
       .toBuffer();
     return await loadImage(resized);
@@ -45,7 +111,6 @@ async function fetchImageAsCanvasImage(url) {
 
 // 🎞️ Build slideshow
 async function createSlideshow(images, outputPath, duration = 2) {
-  // Landscape 16:9
   const width = 1280;
   const height = 720;
 
@@ -90,23 +155,22 @@ async function createSlideshow(images, outputPath, duration = 2) {
       .input(path.join(tempFramesDir, 'frame-%03d.png'))
       .inputOptions(['-framerate', (1 / duration).toFixed(2)])
       .outputOptions([
-        // CHANGED: high-quality master for eBay re-encode
-          '-vf', 'scale=1280:720:flags=lanczos,unsharp=3:3:0.6:3:3:0.0,format=yuv420p',
-  '-r', '30',
-  '-profile:v', 'high',
-  '-level', '4.0',
-  '-preset', 'fast',
-  '-threads', '2',
-  '-tune', 'stillimage',
-  '-crf', '18',
-  '-g', '60',
-  '-keyint_min', '60',
-  '-sc_threshold', '0',
-  '-colorspace', 'bt709',
-  '-color_primaries', 'bt709',
-  '-color_trc', 'bt709',
-  '-movflags', '+faststart',
-])
+        '-vf', 'scale=1280:720:flags=lanczos,unsharp=3:3:0.6:3:3:0.0,format=yuv420p',
+        '-r', '30',
+        '-profile:v', 'high',
+        '-level', '4.0',
+        '-preset', 'fast',
+        '-threads', '2',
+        '-tune', 'stillimage',
+        '-crf', '18',
+        '-g', '60',
+        '-keyint_min', '60',
+        '-sc_threshold', '0',
+        '-colorspace', 'bt709',
+        '-color_primaries', 'bt709',
+        '-color_trc', 'bt709',
+        '-movflags', '+faststart',
+      ])
       .videoCodec('libx264')
       .save(outputPath)
       .on('start', cmd => console.log('🎬 FFmpeg started:', cmd))
@@ -154,7 +218,7 @@ async function parsePipedreamResponse(res) {
 }
 
 // 🔁 Proxy route (frontend ➜ backend ➜ Pipedream)
-app.post('/generate-proxy', async (req, res) => {
+app.post('/generate-proxy', ...maybeGuard, async (req, res) => {
   try {
     const { itemId, images, duration } = req.body || {};
     const cleanId = itemId?.match(/\d{9,12}/)?.[0];
@@ -238,7 +302,7 @@ app.post('/generate-proxy', async (req, res) => {
 });
 
 // ✅ Direct call with image array (kept intact)
-app.post('/generate', async (req, res) => {
+app.post('/generate', ...maybeGuard, async (req, res) => {
   const { imageUrls, duration } = req.body;
 
   if (!Array.isArray(imageUrls) || imageUrls.length === 0) {
@@ -265,5 +329,5 @@ app.post('/generate', async (req, res) => {
 // 🚀 Launch server
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`🚀 SlideMint backend running on port ${PORT}`);
+  console.log(`🚀 SlideMint backend running on port ${PORT} | paywall mode: ${PAYWALL_MODE}`);
 });
