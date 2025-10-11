@@ -6,6 +6,7 @@ export default {
     BOOST250:  process.env.BOOST250_PRODUCT_ID,
     BOOST500:  process.env.BOOST500_PRODUCT_ID,
     AFFILIATE: process.env.AFFILIATE_PRODUCT_ID,
+    FREE:      process.env.FREE_PRODUCT_ID,
   },
 
   CREDIT_COST: {
@@ -24,5 +25,7 @@ export default {
     BOOST100: { credits: 100, expiresDays: 90, csvRowsMax: 200,  concurrency: 3 },
     BOOST250: { credits: 250, expiresDays: 90, csvRowsMax: 500,  concurrency: 4 },
     BOOST500: { credits: 500, expiresDays: 90, csvRowsMax: 1000, concurrency: 5 }
-  }
+  },
+
+  FREE: { credits: 5, label: "SlideMint Free Plan", isFree: true }
 };
