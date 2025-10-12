@@ -6,45 +6,49 @@ import { createClient } from "@supabase/supabase-js";
 
 const router = Router();
 
-// Supabase admin client (server-side)
-const supabaseAdmin = createClient(
-  process.env.PUBLIC_SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
-);
+// ✅ Environment setup
+const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const LEMON_SECRET = process.env.LEMON_WEBHOOK_SECRET;
+const APP_URL = process.env.PUBLIC_APP_URL;
+
+if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+  console.error("❌ Supabase env vars missing");
+}
+
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+  auth: { autoRefreshToken: false, persistSession: false },
+});
 
 // raw body here; mount at /api/webhooks/lemon
 router.post("/webhooks/lemon", raw({ type: "*/*" }), async (req, res) => {
   try {
     // 🔐 Verify Lemon webhook signature
     const sig = req.get("x-signature") || "";
-    const secret = process.env.LEMON_WEBHOOK_SECRET || "";
+    if (!LEMON_SECRET) return res.status(400).send("Missing Lemon secret");
+
     const digest = crypto
-      .createHmac("sha256", secret)
+      .createHmac("sha256", LEMON_SECRET)
       .update(req.body)
       .digest("hex");
-    if (
-      !secret ||
-      !crypto.timingSafeEqual(Buffer.from(digest), Buffer.from(sig, "hex"))
-    ) {
+
+    if (!crypto.timingSafeEqual(Buffer.from(digest), Buffer.from(sig, "hex"))) {
       return res.status(400).send("Bad signature");
     }
 
     // 📨 Parse Lemon event
     const evt = JSON.parse(req.body.toString("utf8"));
     const type = evt?.meta?.event_name;
-    const productId = String(
-      evt?.data?.attributes?.product_id ||
-        evt?.data?.relationships?.product?.data?.id ||
-        ""
-    );
+    const productId =
+      String(evt?.data?.attributes?.product_id || "") ||
+      evt?.data?.relationships?.product?.data?.id ||
+      "";
     const email =
       evt?.data?.attributes?.user_email ||
       evt?.data?.attributes?.customer_email;
-    const licenseKey =
-      evt?.data?.attributes?.key || evt?.data?.attributes?.license_key;
     const eventId = evt?.meta?.event_id || null;
 
-    // 🧩 Credit map based on your plans.config.mjs
+    // 🧩 Credit map from config
     const map = {
       [config.PRODUCTS.BOOST25]: 25,
       [config.PRODUCTS.BOOST100]: 100,
@@ -58,63 +62,48 @@ router.post("/webhooks/lemon", raw({ type: "*/*" }), async (req, res) => {
 
     const delta = map[productId] || 0;
 
-    // 💡 Helper: ensure Supabase user exists
+    // 🧠 Ensure Supabase user exists + trigger magic link
     const ensureSupabaseUser = async (email) => {
       if (!email) return null;
-      const { data: userList } = await supabaseAdmin.auth.admin.listUsers();
-      const existing = userList?.users?.find(
-        (u) => u.email?.toLowerCase() === email.toLowerCase()
-      );
 
-      if (existing) return existing;
-
-      // create new user and send magic link to log in instantly
-      const { data: created } = await supabaseAdmin.auth.admin.createUser({
+      const { data, error } = await supabase.auth.signInWithOtp({
         email,
-        email_confirm: true,
+        options: { emailRedirectTo: `${APP_URL}/dashboard` },
       });
 
-      // send magic link login
-      await supabaseAdmin.auth.admin.generateLink({
-        type: "magiclink",
-        email,
-        options: { redirectTo: `${process.env.PUBLIC_APP_URL}/dashboard` },
-      });
-
-      return created;
+      if (error) console.error("⚠️ Error sending magic link:", error.message);
+      else console.log(`📧 Magic link sent to ${email}`);
     };
 
-    // 🧠 Handle Free Plan: create account + give 5 credits
-    if (
-      productId === config.PRODUCTS.FREE &&
-      ["order_created"].includes(type)
-    ) {
-      const user = await ensureSupabaseUser(email);
-      if (user?.user?.id) {
-        await addCredits(
-          user.user.id,
-          config.FREE.credits,
-          "free_plan_signup",
-          eventId
-        );
-      }
+    // 🪙 Free Plan: auto-create user & send login link
+    if (productId === config.PRODUCTS.FREE && type === "order_created") {
+      console.log(`🆓 Free plan signup for ${email}`);
+      await ensureSupabaseUser(email);
       return res.status(200).send("Free plan processed");
     }
 
-    // 🪙 Handle paid orders & subscriptions
-    if (
-      licenseKey &&
-      delta > 0 &&
-      ["order_created", "subscription_created", "subscription_renewed"].includes(
-        type
-      )
-    ) {
-      await addCredits(licenseKey, delta, type, eventId);
+    // 💳 Paid Plans: credit top-up
+    if (delta > 0 && email && ["order_created", "subscription_renewed"].includes(type)) {
+      // find user by email
+      const { data: users } = await supabase.auth.admin.listUsers();
+      const user = users?.users?.find(
+        (u) => u.email?.toLowerCase() === email.toLowerCase()
+      );
+
+      if (user?.id) {
+        await addCredits(user.id, delta, type, eventId);
+        console.log(`💰 Added ${delta} credits to ${email}`);
+      } else {
+        console.warn(`⚠️ No Supabase user found for ${email}`);
+        await ensureSupabaseUser(email);
+      }
+
+      return res.status(200).send("Credits added");
     }
 
-    res.status(200).send("ok");
+    return res.status(200).send("Event ignored");
   } catch (err) {
-    console.error("Lemon webhook error:", err);
+    console.error("🔥 Lemon webhook error:", err);
     res.status(500).send("Webhook error");
   }
 });
