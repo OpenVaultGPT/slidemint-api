@@ -1,0 +1,7 @@
+./backend/middleware/licenseGuard.mjs
+./backend/middleware/creditsGuard.mjs
+./backend/config/plans.config.mjs
+./backend/index.mjs
+./backend/routes/webhooks.lemon.mjs
+./backend/services/credits.mjs
+./backend/services/lemon.mjs
