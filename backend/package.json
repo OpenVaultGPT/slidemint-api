@@ -11,9 +11,10 @@
     "@supabase/supabase-js": "^2.76.1",
     "canvas": "^2.11.2",
     "cors": "^2.8.5",
+    "dotenv": "^17.2.3",
     "express": "^4.21.2",
     "fluent-ffmpeg": "^2.1.2",
-    "node-fetch": "^2.6.7",
+    "node-fetch": "^2.7.0",
     "sharp": "^0.32.6",
     "uuid": "^9.0.0"
   }
