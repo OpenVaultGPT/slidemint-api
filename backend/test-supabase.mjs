@@ -1,37 +1,23 @@
-import express from "express";
+import "dotenv/config";
 import { createClient } from "@supabase/supabase-js";
 
-const app = express();
+// 🔍 Print envs for debugging
+console.log("Loaded SUPABASE_URL:", process.env.SUPABASE_URL);
+console.log("Loaded SUPABASE_ANON_KEY:", process.env.SUPABASE_ANON_KEY?.slice(0, 10) + "...");
+
+if (!process.env.SUPABASE_URL || !process.env.SUPABASE_ANON_KEY) {
+  throw new Error("❌ Missing SUPABASE_URL or SUPABASE_ANON_KEY in environment!");
+}
+
 const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_ANON_KEY
 );
 
-app.get("/debug-auth", async (req, res) => {
-  try {
-    const authHeader = req.headers.authorization;
-    if (!authHeader) {
-      return res.status(400).json({ error: "Missing Authorization header" });
-    }
-
-    const token = authHeader.replace("Bearer ", "");
-    const { data, error } = await supabase.auth.getUser(token);
-    if (error || !data?.user) {
-      return res.status(401).json({ error: "Invalid or expired token", details: error });
-    }
-
-    res.json({
-      ok: true,
-      user: {
-        id: data.user.id,
-        email: data.user.email,
-      },
-    });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Internal test error" });
-  }
-});
-
-const PORT = process.env.PORT || 8080;
-app.listen(PORT, () => console.log(`✅ Test running on port ${PORT}`));
+try {
+  const { data, error } = await supabase.from("user_credits").select("count").limit(1);
+  if (error) throw error;
+  console.log("✅ Connected to Supabase! Query result:", data);
+} catch (err) {
+  console.error("❌ Connection test failed:", err.message);
+}
