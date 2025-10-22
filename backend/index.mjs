@@ -8,6 +8,8 @@ import sharp from 'sharp';
 import { fileURLToPath } from 'url';
 import { v4 as uuidv4 } from 'uuid';
 import cors from 'cors';
+// Import the helper that constructs a Supabase client from a bearer token
+import { getSupabaseClient } from './config/supabaseClient.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -16,6 +18,19 @@ const app = express();
 app.use(cors());
 app.use(express.static(path.join(__dirname, 'public')));
 app.use(express.json({ limit: '1mb' }));
+
+// -----------------------------------------------------------------------------
+// Attach a Supabase client to every request based on the Authorization header.
+// The frontend should send `Authorization: Bearer <JWT>` for user‑scoped calls.
+app.use((req, res, next) => {
+  const authHeader = req.headers['authorization'] || req.headers['Authorization'];
+  let token = null;
+  if (typeof authHeader === 'string' && authHeader.startsWith('Bearer ')) {
+    token = authHeader.slice('Bearer '.length);
+  }
+  req.supabase = getSupabaseClient(token);
+  next();
+});
 
 // ---- config ----
 const PIPEDREAM_URL = process.env.PIPEDREAM_URL || 'https://eos21xm8bj17yt2.m.pipedream.net';
