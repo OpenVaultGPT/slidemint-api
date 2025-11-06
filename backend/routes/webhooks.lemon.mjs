@@ -49,16 +49,29 @@ router.post("/webhooks/lemon", raw({ type: "*/*" }), async (req, res) => {
     const eventId = evt?.meta?.event_id || null;
 
     // 🧩 Credit map from config
-    const map = {
-      [config.PRODUCTS.BOOST25]: 25,
-      [config.PRODUCTS.BOOST100]: 100,
-      [config.PRODUCTS.BOOST250]: 250,
-      [config.PRODUCTS.BOOST500]: 500,
-      [config.PRODUCTS.STARTER]: config.BOOSTS.STARTER.credits,
-      [config.PRODUCTS.CREATOR]: config.SUBSCRIPTIONS.CREATOR.monthlyCredits,
-      [config.PRODUCTS.PRO]: config.SUBSCRIPTIONS.PRO.monthlyCredits,
-      [config.PRODUCTS.FREE]: config.FREE.credits,
+    const ensureNumber = (value) =>
+      typeof value === "number" && Number.isFinite(value) ? value : 0;
+
+    const creditConfig = {
+      BOOST25: ensureNumber(config.BOOSTS?.BOOST25?.credits ?? 25),
+      BOOST100: ensureNumber(config.BOOSTS?.BOOST100?.credits ?? 100),
+      BOOST250: ensureNumber(config.BOOSTS?.BOOST250?.credits ?? 250),
+      BOOST500: ensureNumber(config.BOOSTS?.BOOST500?.credits ?? 500),
+      STARTER: ensureNumber(config.BOOSTS?.STARTER?.credits),
+      CREATOR: ensureNumber(config.SUBSCRIPTIONS?.CREATOR?.monthlyCredits),
+      PRO: ensureNumber(config.SUBSCRIPTIONS?.PRO?.monthlyCredits),
+      FREE: ensureNumber(config.SUBSCRIPTIONS?.FREE?.credits),
     };
+
+    const map = Object.entries(creditConfig).reduce((acc, [productKey, credits]) => {
+      const productId = config.PRODUCTS?.[productKey];
+
+      if (typeof productId === "string" && productId.length > 0) {
+        acc[productId] = credits;
+      }
+
+      return acc;
+    }, {});
 
     const delta = map[productId] || 0;
 
