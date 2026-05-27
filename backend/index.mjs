@@ -34,6 +34,7 @@ app.use((req, res, next) => {
 
 // ---- config ----
 const PIPEDREAM_URL = process.env.PIPEDREAM_URL || 'https://eos21xm8bj17yt2.m.pipedream.net';
+const VIDEO_BASE_URL = process.env.VIDEO_BASE_URL || 'https://slidemint-api.onrender.com';
 const FETCH_TIMEOUT_MS = Number(process.env.PD_TIMEOUT_MS || 60000);
 
 // ====================================================
@@ -333,7 +334,7 @@ app.post('/generate', ...maybeGuard, async (req, res) => {
 
     await createSlideshow(imageUrls, outputPath, duration || 2);
 
-    const videoUrl = `https://slidemint-api.onrender.com/videos/${videoFilename}`;
+    const videoUrl = `${VIDEO_BASE_URL.replace(/\/$/, '')}/videos/${videoFilename}`;
     return res.status(200).json({ videoUrl });
   } catch (err) {
     console.error('❌ Error generating video:', err.stack || err.message);
